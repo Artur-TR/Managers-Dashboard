@@ -1,0 +1,1795 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>ALIA · Gestão de Equipes</title>
+
+<!--
+  Firebase (Firestore) — carregado via CDN como ES module, sem Node/NPM.
+  Só inicializa o app e o banco; a coleta do Analytics não é usada aqui.
+  O restante da aplicação (fim do <body>) é um script clássico (não-module)
+  por depender de escopo compartilhado entre dezenas de funções; por isso ele
+  não importa o Firestore diretamente — em vez disso, este módulo expõe o que
+  for necessário em `window.__firestore` e dispara o evento "firebase-ready",
+  que o script principal escuta antes de ligar os listeners em tempo real.
+-->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyApfIWmiXPnlwx1PKtlrOItSvZ6a0jAjzE",
+    authDomain: "gestao-alia.firebaseapp.com",
+    projectId: "gestao-alia",
+    storageBucket: "gestao-alia.firebasestorage.app",
+    messagingSenderId: "746682094353",
+    appId: "1:746682094353:web:f19f407bc6c58388a6f2b0",
+    measurementId: "G-K6M6LT3ZCS"
+  };
+
+  const firebaseApp = initializeApp(firebaseConfig);
+  const db = getFirestore(firebaseApp);
+
+  window.__firestore = { db: db, collection: collection, doc: doc, addDoc: addDoc, updateDoc: updateDoc, deleteDoc: deleteDoc, onSnapshot: onSnapshot };
+  window.dispatchEvent(new CustomEvent('firebase-ready'));
+</script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  // Nota de arquitetura: Preflight fica ligado aqui para o visual do protótipo.
+  // Ao embutir este módulo dentro do portal ALIA de verdade, prefira gerar o CSS
+  // do Tailwind em build-time com prefixo (ou corePlugins.preflight:false) para
+  // não sobrescrever estilos globais da página host.
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          trorange: '#D64000',
+          trorangedark: '#B23500',
+          trblue: '#011B36',
+          trbluelight: '#0B2E52',
+          trbg: '#F4F4F6'
+        },
+        fontFamily: { sans: ['Inter', 'system-ui', 'sans-serif'] },
+        keyframes: {
+          fadescale: { '0%': { opacity: 0, transform: 'scale(0.95) translateY(4px)' }, '100%': { opacity: 1, transform: 'scale(1) translateY(0)' } },
+          fadein: { '0%': { opacity: 0 }, '100%': { opacity: 1 } },
+          toastin: { '0%': { opacity: 0, transform: 'translateY(8px)' }, '100%': { opacity: 1, transform: 'translateY(0)' } }
+        },
+        animation: {
+          'fade-scale': 'fadescale 0.22s ease-out',
+          'fade-in': 'fadein 0.18s ease-out',
+          'toast-in': 'toastin 0.2s ease-out'
+        }
+      }
+    }
+  };
+</script>
+<style>
+  html, body { background: #F4F4F6; }
+  body { font-family: 'Inter', system-ui, sans-serif; }
+  [contenteditable="true"]:focus { outline: 2px solid #D64000; outline-offset: 2px; border-radius: 4px; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: #d8dade; border-radius: 999px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+</style>
+<!-- Chart.js via CDN, sem Node/NPM — usado pela view "Cockpit OPS" (ver renderCockpitCharts). -->
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<!-- SheetJS via CDN — lê .xlsx/.xls/.csv no navegador para o upload híbrido de planilhas (ver readSpreadsheetFile). -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body class="bg-trbg text-gray-800 antialiased">
+
+  <header class="bg-trblue text-white sticky top-0 z-30 shadow-md">
+    <div class="max-w-7xl mx-auto px-4 sm:px-6 h-14 flex items-center gap-3">
+      <span class="bg-trorange text-white text-xs font-bold tracking-wide px-2.5 py-1 rounded-full">ALIA</span>
+      <span class="font-semibold text-sm hidden sm:inline">Portal Interno · Thomson Reuters</span>
+      <span class="text-white/60 text-xs hidden md:inline">Módulo: Gestão de Equipes</span>
+      <div id="topbar-session" class="ml-auto flex items-center gap-2"></div>
+    </div>
+  </header>
+
+  <div id="login-root">
+    <div class="min-h-[70vh] flex items-center justify-center">
+      <div class="w-10 h-10 border-4 border-trorange/30 border-t-trorange rounded-full animate-spin"></div>
+    </div>
+  </div>
+
+  <div id="shell" class="hidden flex flex-col md:flex-row min-h-[calc(100vh-3.5rem)]">
+    <nav id="nav-root" class="flex flex-row md:flex-col gap-1 md:gap-1.5 bg-trblue text-white w-full md:w-56 shrink-0 px-2 md:px-3 py-2 md:py-5 overflow-x-auto md:overflow-visible md:min-h-[calc(100vh-3.5rem)]"></nav>
+    <main id="view-root" class="flex-1 min-w-0 p-4 sm:p-6 lg:p-8 max-w-7xl w-full mx-auto"></main>
+  </div>
+
+  <div id="modal-root"></div>
+  <div id="toast-root" class="fixed bottom-4 right-4 z-[100] flex flex-col gap-2 items-end"></div>
+
+<script>
+'use strict';
+
+/* ============================================================
+   ÍCONES (SVG inline minimalistas, monocromáticos via currentColor)
+   ============================================================ */
+var ICON_PATHS = {
+  dashboard: '<rect x="3" y="3" width="7" height="9" rx="1.5"></rect><rect x="14" y="3" width="7" height="5" rx="1.5"></rect><rect x="14" y="12" width="7" height="9" rx="1.5"></rect><rect x="3" y="16" width="7" height="5" rx="1.5"></rect>',
+  sheet: '<rect x="3" y="4" width="18" height="16" rx="2"></rect><line x1="3" y1="10" x2="21" y2="10"></line><line x1="9" y1="10" x2="9" y2="20"></line>',
+  search: '<circle cx="11" cy="11" r="7"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line>',
+  plus: '<line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line>',
+  trash: '<polyline points="4 7 20 7"></polyline><path d="M6 7l1 13a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-13"></path><path d="M9 7V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v3"></path>',
+  edit: '<path d="M12 20h9"></path><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"></path>',
+  close: '<line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line>',
+  check: '<polyline points="20 6 9 17 4 12"></polyline>',
+  undo: '<path d="M3 7v6h6"></path><path d="M3 13a9 9 0 1 0 3-7.7L3 7"></path>',
+  logout: '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path><polyline points="16 17 21 12 16 7"></polyline><line x1="21" y1="12" x2="9" y2="12"></line>',
+  refresh: '<polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path>',
+  calendar: '<rect x="3" y="4" width="18" height="17" rx="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line>',
+  user: '<circle cx="12" cy="8" r="4"></circle><path d="M4 21c0-4 4-6 8-6s8 2 8 6"></path>',
+  chart: '<line x1="3" y1="21" x2="21" y2="21"></line><rect x="6" y="13" width="3" height="8"></rect><rect x="11" y="9" width="3" height="12"></rect><rect x="16" y="5" width="3" height="16"></rect>',
+  clock: '<circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 16 14"></polyline>',
+  alert: '<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"></path><line x1="12" y1="9" x2="12" y2="13"></line><line x1="12" y1="17" x2="12.01" y2="17"></line>'
+};
+function icon(name, cls) {
+  return '<svg class="' + (cls || 'w-5 h-5') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (ICON_PATHS[name] || '') + '</svg>';
+}
+
+/* ============================================================
+   UTILITÁRIOS
+   ============================================================ */
+function uid(prefix) { return (prefix || 'id') + '-' + Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+function escapeHtml(str) {
+  return String(str == null ? '' : str).replace(/[&<>"']/g, function (ch) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch];
+  });
+}
+function initials(name) {
+  var parts = String(name || '').trim().split(/\s+/);
+  return ((parts[0] ? parts[0][0] : '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
+}
+function todayIso() { return new Date().toISOString().slice(0, 10); }
+function nowLocalInputValue() {
+  var d = new Date();
+  var tz = d.getTimezoneOffset();
+  var local = new Date(d.getTime() - tz * 60000);
+  return local.toISOString().slice(0, 16);
+}
+function formatDateBr(iso) {
+  if (!iso) return '';
+  var p = iso.slice(0, 10).split('-');
+  return p.length === 3 ? p[2] + '/' + p[1] + '/' + p[0] : iso;
+}
+function formatDateTimeBr(v) {
+  if (!v) return '';
+  var d = new Date(v);
+  if (isNaN(d.getTime())) return v;
+  var dd = String(d.getDate()).padStart(2, '0');
+  var mm = String(d.getMonth() + 1).padStart(2, '0');
+  var hh = String(d.getHours()).padStart(2, '0');
+  var mi = String(d.getMinutes()).padStart(2, '0');
+  return dd + '/' + mm + ' ' + hh + ':' + mi;
+}
+function formatDuration(mins) {
+  if (mins == null || isNaN(mins) || mins < 0) return '';
+  if (mins < 60) return mins + ' min';
+  var h = Math.floor(mins / 60), m = mins % 60;
+  return h + 'h' + (m ? ' ' + m + 'min' : '');
+}
+function minutesBetween(startIso, endIso) {
+  if (!startIso || !endIso) return null;
+  var diff = (new Date(endIso).getTime() - new Date(startIso).getTime()) / 60000;
+  return diff >= 0 ? Math.round(diff) : null;
+}
+
+/* O Firestore não aceita arrays aninhados (array dentro de array), então a
+   grade 2D das planilhas "genéricas" (usada em toda a renderização/edição
+   local) é convertida para um mapa plano { linhas, colunas, celulas:{"r-c":valor} }
+   só no momento de gravar, e reconstruída de volta como array 2D ao ler. */
+function gridToFirestoreFields(dados) {
+  var celulas = {};
+  dados.forEach(function (row, r) { row.forEach(function (cell, c) { celulas[r + '-' + c] = cell; }); });
+  return { linhas: dados.length, colunas: dados.length ? dados[0].length : 0, celulas: celulas };
+}
+function firestoreFieldsToGrid(fields) {
+  var linhas = fields.linhas || 0, colunas = fields.colunas || 0, celulas = fields.celulas || {};
+  var grid = [];
+  for (var r = 0; r < linhas; r++) {
+    var row = [];
+    for (var c = 0; c < colunas; c++) row.push(celulas[r + '-' + c] || '');
+    grid.push(row);
+  }
+  return grid;
+}
+
+/* ============================================================
+   CATÁLOGOS FIXOS
+   ============================================================ */
+var QUEUES = [
+  { id: 'fila13', codigo: 'Fila 13', categoria: 'FUNCIONAL', descricao: 'Assuntos de Folha de Pagamento (módulo Folha)' },
+  { id: 'fila23', codigo: 'Fila 23', categoria: 'FUNCIONAL', descricao: 'Empresas do Simples Nacional (módulo Escrita Fiscal)' },
+  { id: 'fila24', codigo: 'Fila 24', categoria: 'FUNCIONAL', descricao: 'Empresas do Lucro Presumido, Lucro Real e Patrimônio' },
+  { id: 'fila25', codigo: 'Fila 25', categoria: 'FUNCIONAL', descricao: 'Contabilidade e Lalur' },
+  { id: 'filaAuditorFiscal', codigo: 'Fila AuditorFiscal', categoria: 'FUNCIONAL', descricao: 'Auditor Fiscal' },
+  { id: 'fila81', codigo: 'Fila 81', categoria: 'FUNCIONAL', descricao: 'Onvio Core Folha' },
+  { id: 'fila82', codigo: 'Fila 82', categoria: 'FUNCIONAL', descricao: 'Onvio Core Fiscont' },
+  { id: 'fila31', codigo: 'Fila 31', categoria: 'ÁREA TÉCNICA', descricao: 'Onvio Gestão, Portal do Cliente, Portal do Empregado (Domínio para Você) e Certificados Digitais' },
+  { id: 'fila41', codigo: 'Fila 41', categoria: 'ÁREA TÉCNICA', descricao: 'Onvio Processos' },
+  { id: 'fila42', codigo: 'Fila 42', categoria: 'ÁREA TÉCNICA', descricao: 'Onvio Messenger' },
+  { id: 'fila51', codigo: 'Fila 51', categoria: 'ÁREA TÉCNICA', descricao: 'Acesso ao sistema, atualização, instalação e backup' },
+  { id: 'fila61', codigo: 'Fila 61', categoria: 'ÁREA TÉCNICA', descricao: 'Honorários, Custos, Processos, Administrar, Auditoria, Registro e outros' },
+  { id: 'fila62', codigo: 'Fila 62', categoria: 'ÁREA TÉCNICA', descricao: "Busca NFe, API's, Conteúdo Contábil Trib., OnBalance e Kolossus Auditor" },
+  { id: 'conversao', codigo: 'Conversão', categoria: 'ÁREA TÉCNICA', descricao: 'Exporta/Importa, Conversão, Reconstrução de BD, Linux/MacOS' },
+  { id: 'performance', codigo: 'Performance', categoria: 'ÁREA TÉCNICA', descricao: 'Problemas de Performance' }
+];
+function getQueueById(id) { for (var i = 0; i < QUEUES.length; i++) if (QUEUES[i].id === id) return QUEUES[i]; return null; }
+
+var TRAINING_NAMES = ['Fundamentos Sistemas Domínio', 'Atendimento ao Cliente - Nível 1', 'LGPD e Segurança da Informação', 'Onvio Avançado', 'Gestão de Filas e SLA'];
+var ACTION_TYPES = ['Acompanhamento de Pendências', '1:1', 'Feedback', 'Treinamento'];
+var MANAGERS = [
+  { id: 'mgr-luis', nome: 'Luis Antonio Soares', cargo: 'Coordenador', setor: 'Área Técnica' },
+  { id: 'mgr-jaqueline', nome: 'Jaqueline Mussoi', cargo: 'Coordenadora', setor: 'Fiscont' }
+];
+
+/* ============================================================
+   CARGA INICIAL (MOCK) — 8 técnicos, 4 por setor
+   ============================================================ */
+function trEntry(nome, status, data) { return { id: uid('tr'), nome: nome, status: status, data: data || null }; }
+function tlEntry(tipo, inicio, fim, obs) { return { id: uid('tl'), tipo: tipo, inicio: inicio, fim: fim || null, observacoes: obs }; }
+function taskEntry(titulo, status, criadaEm) { return { id: uid('tk'), titulo: titulo, status: status, criadaEm: criadaEm }; }
+
+function seedTechnicians() {
+  return [
+    {
+      id: 'tec-artur', nome: 'Artur Seixas Pedro', cargo: 'Analista de Suporte Pleno', setor: 'Área Técnica',
+      tempoDeCasa: '2 anos e 3 meses', avatarIniciais: initials('Artur Seixas Pedro'),
+      resumoExecutivo: 'Perfil técnico consistente, com ótima evolução nas filas de infraestrutura (51) e processos (41). Potencial para assumir chamados de maior complexidade em Onvio Gestão.',
+      filas: ['fila31', 'fila41', 'fila51', 'performance'],
+      metricas: { atendimentosMes: 142, metaAtendimentos: 150, slaPercentual: 96, csat: 4.7, tmeMinutos: 18 },
+      treinamentos: [trEntry(TRAINING_NAMES[0], 'concluido', '2026-03-10'), trEntry(TRAINING_NAMES[1], 'concluido', '2026-04-02'), trEntry(TRAINING_NAMES[2], 'concluido', '2026-05-20'), trEntry(TRAINING_NAMES[3], 'pendente'), trEntry(TRAINING_NAMES[4], 'concluido', '2026-07-30')],
+      timeline: [tlEntry('1:1', '2026-08-18T14:00', '2026-08-18T14:30', 'Alinhamento de expectativas para o trimestre. Artur demonstrou interesse em evoluir na Fila 61.'), tlEntry('Acompanhamento de Pendências', '2026-08-11T09:30', '2026-08-11T09:50', 'Revisão de 3 chamados em atraso na Fila 41. Combinado prazo de regularização até 14/08.')],
+      tarefas: [taskEntry('Concluir trilha Onvio Avançado', 'andamento', '2026-08-20'), taskEntry('Revisar SLA da Fila 51', 'andamento', '2026-08-24'), taskEntry('Atualizar documentação de backup', 'concluida', '2026-08-05')]
+    },
+    {
+      id: 'tec-bruna', nome: 'Bruna Ferreira Campos', cargo: 'Analista de Suporte Júnior', setor: 'Área Técnica',
+      tempoDeCasa: '8 meses', avatarIniciais: initials('Bruna Ferreira Campos'),
+      resumoExecutivo: 'Em curva de aprendizado acelerada. Já assume Fila 42 com autonomia; em desenvolvimento nas filas de acesso e instalação (51).',
+      filas: ['fila31', 'fila42'],
+      metricas: { atendimentosMes: 88, metaAtendimentos: 100, slaPercentual: 91, csat: 4.4, tmeMinutos: 24 },
+      treinamentos: [trEntry(TRAINING_NAMES[0], 'concluido', '2026-02-14'), trEntry(TRAINING_NAMES[1], 'concluido', '2026-03-01'), trEntry(TRAINING_NAMES[2], 'pendente'), trEntry(TRAINING_NAMES[3], 'agendado', '2026-09-10')],
+      timeline: [tlEntry('Feedback', '2026-08-20T10:00', '2026-08-20T10:15', 'Feedback positivo sobre postura com o cliente. Reforçado ponto de atenção em SLA da Fila 51.')],
+      tarefas: [taskEntry('Sombrear atendimento do Rafael', 'andamento', '2026-08-22'), taskEntry('Concluir onboarding de sistemas', 'concluida', '2026-01-15')]
+    },
+    {
+      id: 'tec-rafael', nome: 'Rafael Andrade Souza', cargo: 'Analista de Suporte Sênior', setor: 'Área Técnica',
+      tempoDeCasa: '4 anos e 7 meses', avatarIniciais: initials('Rafael Andrade Souza'),
+      resumoExecutivo: 'Referência técnica do setor. Atua como backup do coordenador em decisões de escalonamento e apoia onboarding de novos analistas.',
+      filas: ['fila41', 'fila61', 'fila62', 'conversao', 'performance'],
+      metricas: { atendimentosMes: 176, metaAtendimentos: 160, slaPercentual: 99, csat: 4.9, tmeMinutos: 14 },
+      treinamentos: TRAINING_NAMES.map(function (n) { return trEntry(n, 'concluido', '2026-01-20'); }),
+      timeline: [tlEntry('Acompanhamento de Pendências', '2026-08-22T11:00', '2026-08-22T11:25', 'Nenhuma pendência crítica identificada. Fila 62 com atendimento em dia.'), tlEntry('1:1', '2026-08-01T15:00', '2026-08-01T15:40', 'Discutido plano de carreira e mentoria formal para os analistas júnior.')],
+      tarefas: [taskEntry('Estruturar mentoria para júniores', 'andamento', '2026-08-15'), taskEntry('Revisar runbook da Fila 62', 'concluida', '2026-07-28')]
+    },
+    {
+      id: 'tec-gabriel', nome: 'Gabriel Henrique Nogueira', cargo: 'Analista de Suporte Júnior', setor: 'Área Técnica',
+      tempoDeCasa: '3 meses', avatarIniciais: initials('Gabriel Henrique Nogueira'),
+      resumoExecutivo: 'Recém-integrado. Foco atual em consolidar Fila 51 (acesso e instalação) com acompanhamento próximo do Rafael.',
+      filas: ['fila51', 'fila42'],
+      metricas: { atendimentosMes: 41, metaAtendimentos: 70, slaPercentual: 85, csat: 4.1, tmeMinutos: 31 },
+      treinamentos: [trEntry(TRAINING_NAMES[0], 'concluido', '2026-06-05'), trEntry(TRAINING_NAMES[1], 'pendente'), trEntry(TRAINING_NAMES[2], 'pendente')],
+      timeline: [tlEntry('Acompanhamento de Pendências', '2026-08-25T09:00', '2026-08-25T09:30', 'Apoio na priorização de fila. TME ainda acima da meta; plano de ação combinado com o Rafael como padrinho técnico.')],
+      tarefas: [taskEntry('Concluir checklist de onboarding', 'andamento', '2026-08-10'), taskEntry('Primeiro atendimento supervisionado', 'concluida', '2026-06-12')]
+    },
+    {
+      id: 'tec-carlos', nome: 'Carlos Eduardo Lima', cargo: 'Analista de Suporte Pleno', setor: 'Fiscont',
+      tempoDeCasa: '1 ano e 9 meses', avatarIniciais: initials('Carlos Eduardo Lima'),
+      resumoExecutivo: 'Bom domínio de Simples Nacional (Fila 23) e Lucro Presumido/Real (Fila 24). Em desenvolvimento na Fila 82 (Onvio Core Fiscont).',
+      filas: ['fila23', 'fila24', 'fila25', 'fila82'],
+      metricas: { atendimentosMes: 121, metaAtendimentos: 130, slaPercentual: 94, csat: 4.6, tmeMinutos: 20 },
+      treinamentos: [trEntry(TRAINING_NAMES[0], 'concluido', '2026-02-01'), trEntry(TRAINING_NAMES[1], 'concluido', '2026-03-15'), trEntry(TRAINING_NAMES[2], 'concluido', '2026-04-22'), trEntry(TRAINING_NAMES[4], 'concluido', '2026-08-15')],
+      timeline: [tlEntry('Treinamento', '2026-08-15T13:00', '2026-08-15T13:50', 'Reforço em Contabilidade e Lalur (Fila 25) com estudo de casos reais.'), tlEntry('Feedback', '2026-07-28T10:00', '2026-07-28T10:15', 'Elogiado pela clareza nas tratativas com clientes do Lucro Real.')],
+      tarefas: [taskEntry('Evoluir na Fila 82', 'andamento', '2026-08-18'), taskEntry('Revisar 5 chamados do Lucro Real', 'concluida', '2026-08-02')]
+    },
+    {
+      id: 'tec-daniela', nome: 'Daniela Rocha Martins', cargo: 'Analista de Suporte Júnior', setor: 'Fiscont',
+      tempoDeCasa: '5 meses', avatarIniciais: initials('Daniela Rocha Martins'),
+      resumoExecutivo: 'Recém-integrada ao setor Fiscont. Foco atual em consolidar Fila 23 (Simples Nacional) antes de assumir Lucro Presumido/Real.',
+      filas: ['fila23', 'fila24'],
+      metricas: { atendimentosMes: 54, metaAtendimentos: 70, slaPercentual: 88, csat: 4.2, tmeMinutos: 29 },
+      treinamentos: [trEntry(TRAINING_NAMES[0], 'concluido', '2026-04-04'), trEntry(TRAINING_NAMES[1], 'pendente'), trEntry(TRAINING_NAMES[2], 'concluido', '2026-05-18')],
+      timeline: [tlEntry('Acompanhamento de Pendências', '2026-08-21T10:00', '2026-08-21T10:30', 'Apoio na priorização de fila. TME ainda acima da meta do setor; plano de ação definido.')],
+      tarefas: [taskEntry('Concluir trilha de Escrita Fiscal', 'andamento', '2026-08-19'), taskEntry('Fundamentos Sistemas Domínio', 'concluida', '2026-04-04')]
+    },
+    {
+      id: 'tec-fernanda', nome: 'Fernanda Alves Barreto', cargo: 'Analista de Suporte Sênior', setor: 'Fiscont',
+      tempoDeCasa: '3 anos e 4 meses', avatarIniciais: initials('Fernanda Alves Barreto'),
+      resumoExecutivo: 'Referência em Auditor Fiscal e Lalur. Apoia o coordenador em revisões de qualidade dos atendimentos mais complexos do setor.',
+      filas: ['fila23', 'fila25', 'filaAuditorFiscal', 'fila82'],
+      metricas: { atendimentosMes: 133, metaAtendimentos: 125, slaPercentual: 97, csat: 4.8, tmeMinutos: 16 },
+      treinamentos: TRAINING_NAMES.slice(0, 4).map(function (n) { return trEntry(n, 'concluido', '2026-02-10'); }),
+      timeline: [tlEntry('1:1', '2026-08-12T14:00', '2026-08-12T14:35', 'Combinado apoio na revisão de qualidade dos atendimentos de Daniela e Thiago.')],
+      tarefas: [taskEntry('Revisar qualidade - amostra de 10 chamados', 'andamento', '2026-08-21'), taskEntry('Atualizar FAQ de Auditor Fiscal', 'concluida', '2026-07-30')]
+    },
+    {
+      id: 'tec-thiago', nome: 'Thiago Moreira Cardoso', cargo: 'Analista de Suporte Pleno', setor: 'Fiscont',
+      tempoDeCasa: '1 ano e 2 meses', avatarIniciais: initials('Thiago Moreira Cardoso'),
+      resumoExecutivo: 'Bom ritmo de evolução em Lucro Presumido/Real. Precisa de reforço em Onvio Core Fiscont (Fila 82) para reduzir o TME.',
+      filas: ['fila24', 'fila25', 'fila82'],
+      metricas: { atendimentosMes: 97, metaAtendimentos: 110, slaPercentual: 89, csat: 4.3, tmeMinutos: 27 },
+      treinamentos: [trEntry(TRAINING_NAMES[0], 'concluido', '2026-05-02'), trEntry(TRAINING_NAMES[2], 'concluido', '2026-06-11'), trEntry(TRAINING_NAMES[4], 'pendente'), trEntry(TRAINING_NAMES[3], 'agendado', '2026-09-18')],
+      timeline: [tlEntry('Acompanhamento de Pendências', '2026-08-19T09:00', '2026-08-19T09:20', 'TME acima da meta na Fila 82; combinado par com Fernanda para reduzir tempo médio.')],
+      tarefas: [taskEntry('Par técnico com Fernanda (Fila 82)', 'andamento', '2026-08-19'), taskEntry('Concluir Fundamentos Sistemas Domínio', 'concluida', '2026-05-02')]
+    }
+  ];
+}
+
+function seedSpreadsheets() {
+  return [
+    { id: 'sp-filas', nome: 'Matriz de Filas x Técnicos', tipo: 'filas', criadaEm: todayIso() },
+    { id: 'sp-treinamentos', nome: 'Matriz de Treinamentos', tipo: 'treinamentos', criadaEm: todayIso() },
+    {
+      id: 'sp-onboarding', nome: 'Checklist de Onboarding', tipo: 'generic', criadaEm: todayIso(),
+      dados: [['Etapa', 'Responsável', 'Status', 'Prazo'], ['Acesso a sistemas', 'TI', 'Concluído', 'D+1'], ['Apresentação da equipe', 'Coordenador', 'Concluído', 'D+1'], ['Treinamento Fundamentos', 'RH', 'Pendente', 'D+7'], ['Shadowing com sênior', 'Coordenador', 'Pendente', 'D+15']]
+    },
+    {
+      id: 'sp-escala', nome: 'Escala de Plantão', tipo: 'generic', criadaEm: todayIso(),
+      dados: [['Semana', 'Segunda', 'Terça', 'Quarta', 'Quinta', 'Sexta'], ['Semana 1', 'Artur', 'Bruna', 'Rafael', 'Carlos', 'Daniela'], ['Semana 2', 'Rafael', 'Carlos', 'Daniela', 'Fernanda', 'Thiago'], ['Semana 3', 'Fernanda', 'Thiago', 'Artur', 'Bruna', 'Rafael']]
+    }
+  ];
+}
+
+/* ============================================================
+   FIRESTORE — referências injetadas por bootAfterFirebase() (ver init no
+   fim do arquivo). Ficam como variáveis de módulo para que todas as
+   funções de dados abaixo possam usá-las sem precisar importar de novo.
+   ============================================================ */
+var db, fsCollection, fsDoc, fsAddDoc, fsUpdateDoc, fsDeleteDoc, fsOnSnapshot;
+
+/* Estado local em memória — é um ESPELHO do Firestore, mantido em dia
+   pelos listeners onSnapshot (ver initFirestoreListeners). Nenhuma função
+   de UI deve tratar STATE.technicians/STATE.spreadsheets como fonte da
+   verdade para persistência: elas só leem daqui; quem escreve é sempre
+   o Firestore, e a UI é atualizada de volta quando o snapshot chega. */
+var STATE = { managers: MANAGERS, technicians: [], spreadsheets: [] };
+function getState() { return STATE; }
+
+function spinnerHtml(extraCls) {
+  return '<div class="' + (extraCls || '') + ' flex justify-center py-10"><div class="w-8 h-8 border-4 border-trorange/30 border-t-trorange rounded-full animate-spin"></div></div>';
+}
+
+/* ============================================================
+   CAMADA DE DADOS — TÉCNICOS (coleção "technicians" no Firestore)
+   Cada função grava no Firestore e retorna uma Promise<boolean> (sucesso
+   ou falha, já com o erro tratado e reportado via toast). A UI NÃO é
+   atualizada aqui: quem re-renderiza é sempre o listener onSnapshot em
+   initFirestoreListeners(), que é a única fonte da verdade em tempo real.
+   ============================================================ */
+function getManagers() { return STATE.managers; }
+function getTechniciansBySetor(setor) { return STATE.technicians.filter(function (t) { return t.setor === setor; }); }
+function getTechnicianById(id) { for (var i = 0; i < STATE.technicians.length; i++) if (STATE.technicians[i].id === id) return STATE.technicians[i]; return null; }
+
+function reportDataError(err, message) {
+  console.error(message, err);
+  showToast(message, 'error');
+  return false;
+}
+
+function addTechnician(data) {
+  var payload = {
+    nome: data.nome, cargo: data.cargo, setor: data.setor,
+    tempoDeCasa: data.tempoDeCasa || 'Recém-chegado(a)', avatarIniciais: initials(data.nome),
+    resumoExecutivo: data.resumoExecutivo || '', filas: [],
+    metricas: { atendimentosMes: 0, metaAtendimentos: Number(data.metaAtendimentos) || 100, slaPercentual: 0, csat: 0, tmeMinutos: 0 },
+    treinamentos: [], timeline: [], tarefas: []
+  };
+  return fsAddDoc(fsCollection(db, 'technicians'), payload).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível adicionar o técnico.'); });
+}
+function updateTechnician(id, patch) {
+  if (patch.nome) patch = Object.assign({}, patch, { avatarIniciais: initials(patch.nome) });
+  return fsUpdateDoc(fsDoc(db, 'technicians', id), patch).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível salvar as alterações do técnico.'); });
+}
+function deleteTechnician(id) {
+  return fsDeleteDoc(fsDoc(db, 'technicians', id)).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível excluir o técnico.'); });
+}
+function toggleFila(techId, filaId) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var filas = t.filas.slice();
+  var idx = filas.indexOf(filaId);
+  if (idx === -1) filas.push(filaId); else filas.splice(idx, 1);
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { filas: filas }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível atualizar a fila.'); });
+}
+function updateMetrics(id, metricas) {
+  return fsUpdateDoc(fsDoc(db, 'technicians', id), { metricas: metricas }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível atualizar as métricas.'); });
+}
+function addTimelineEntry(id, entry) {
+  var t = getTechnicianById(id); if (!t) return Promise.resolve(false);
+  var timeline = [{ id: uid('tl'), tipo: entry.tipo, inicio: entry.inicio, fim: entry.fim || null, observacoes: entry.observacoes }].concat(t.timeline);
+  return fsUpdateDoc(fsDoc(db, 'technicians', id), { timeline: timeline }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível registrar a ação.'); });
+}
+function deleteTimelineEntry(id, entryId) {
+  var t = getTechnicianById(id); if (!t) return Promise.resolve(false);
+  var timeline = t.timeline.filter(function (e) { return e.id !== entryId; });
+  return fsUpdateDoc(fsDoc(db, 'technicians', id), { timeline: timeline }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível remover o registro.'); });
+}
+
+function scheduleTraining(techId, nome, data) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var treinamentos = t.treinamentos.concat([trEntry(nome, 'agendado', data)]);
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { treinamentos: treinamentos }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível agendar o treinamento.'); });
+}
+function markTrainingComplete(techId, entryId) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var treinamentos = t.treinamentos.map(function (e) { return e.id === entryId ? Object.assign({}, e, { status: 'concluido', data: e.data || todayIso() }) : e; });
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { treinamentos: treinamentos }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível concluir o treinamento.'); });
+}
+function deleteTrainingEntry(techId, entryId) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var treinamentos = t.treinamentos.filter(function (e) { return e.id !== entryId; });
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { treinamentos: treinamentos }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível remover o treinamento.'); });
+}
+function setTrainingMatrixCell(techId, nome, done) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var found = false;
+  var treinamentos = t.treinamentos.map(function (e) {
+    if (e.nome !== nome) return e;
+    found = true;
+    return Object.assign({}, e, { status: done ? 'concluido' : 'pendente', data: done ? (e.data || todayIso()) : e.data });
+  });
+  if (!found && done) treinamentos = treinamentos.concat([trEntry(nome, 'concluido', todayIso())]);
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { treinamentos: treinamentos }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível atualizar o treinamento.'); });
+}
+
+function addTask(techId, titulo) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var tarefas = [taskEntry(titulo, 'andamento', todayIso())].concat(t.tarefas);
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { tarefas: tarefas }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível atribuir a tarefa.'); });
+}
+function setTaskStatus(techId, taskId, status) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var tarefas = t.tarefas.map(function (tk) { return tk.id === taskId ? Object.assign({}, tk, { status: status }) : tk; });
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { tarefas: tarefas }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível atualizar a tarefa.'); });
+}
+function deleteTask(techId, taskId) {
+  var t = getTechnicianById(techId); if (!t) return Promise.resolve(false);
+  var tarefas = t.tarefas.filter(function (tk) { return tk.id !== taskId; });
+  return fsUpdateDoc(fsDoc(db, 'technicians', techId), { tarefas: tarefas }).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível remover a tarefa.'); });
+}
+
+/* ============================================================
+   CAMADA DE DADOS — PLANILHAS (coleção "spreadsheets" no Firestore)
+   Mesmo padrão da seção de técnicos: cada função escreve no Firestore e
+   devolve uma Promise<boolean>; a re-renderização da grade/detalhe vem
+   do listener onSnapshot (handleSpreadsheetsUpdate), nunca daqui.
+   ============================================================ */
+function syncSpreadsheetData(spreadsheetId, patch) {
+  var finalPatch = Object.assign({}, patch);
+  if (finalPatch.dados) {
+    var flat = gridToFirestoreFields(finalPatch.dados);
+    delete finalPatch.dados;
+    finalPatch.linhas = flat.linhas; finalPatch.colunas = flat.colunas; finalPatch.celulas = flat.celulas;
+  }
+  return fsUpdateDoc(fsDoc(db, 'spreadsheets', spreadsheetId), finalPatch).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível salvar a planilha.'); });
+}
+/* O link de compartilhamento do Google Sheets sempre traz o ID entre "/d/"
+   e a próxima barra (geralmente "/edit"), ex.:
+   https://docs.google.com/spreadsheets/d/ESSE_TRECHO_AQUI/edit#gid=0 */
+function extractGoogleSheetId(link) {
+  var match = String(link || '').match(/\/d\/([a-zA-Z0-9-_]+)/);
+  return match ? match[1] : null;
+}
+function createGoogleSheetRecord(nome, sheetId) {
+  var payload = { nome: nome, tipo: 'google-sheet', sheetId: sheetId, criadaEm: todayIso() };
+  return fsAddDoc(fsCollection(db, 'spreadsheets'), payload).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível importar a planilha do Google Sheets.'); });
+}
+/* Lê um arquivo .xlsx/.xls/.csv no navegador (SheetJS) e devolve a primeira
+   aba já como matriz 2D — mesmo formato usado pelas planilhas "genéricas",
+   o que permite reaproveitar gridToFirestoreFields para gravar no Firestore.
+   codepage:65001 (UTF-8) evita "TÃ©cnico" no lugar de "Técnico" ao ler .csv
+   — sem isso o SheetJS interpreta os bytes UTF-8 como Latin-1. defval:''
+   evita células vazias como `undefined` (o Firestore rejeita valores
+   undefined em addDoc/updateDoc). */
+function readSpreadsheetFile(file) {
+  return new Promise(function (resolve, reject) {
+    var reader = new FileReader();
+    reader.onerror = function () { reject(reader.error || new Error('Falha ao ler o arquivo.')); };
+    reader.onload = function () {
+      try {
+        var workbook = XLSX.read(reader.result, { type: 'array', codepage: 65001 });
+        var worksheet = workbook.Sheets[workbook.SheetNames[0]];
+        resolve(XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }));
+      } catch (err) { reject(err); }
+    };
+    reader.readAsArrayBuffer(file);
+  });
+}
+function createExcelImportRecord(nome, dados) {
+  var flat = gridToFirestoreFields(dados);
+  var payload = { nome: nome, tipo: 'excel-import', criadaEm: todayIso(), linhas: flat.linhas, colunas: flat.colunas, celulas: flat.celulas };
+  return fsAddDoc(fsCollection(db, 'spreadsheets'), payload).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível importar a planilha.'); });
+}
+function deleteSpreadsheetRecord(spreadsheetId) {
+  return fsDeleteDoc(fsDoc(db, 'spreadsheets', spreadsheetId)).then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível remover a planilha.'); });
+}
+
+/* ============================================================
+   SINCRONIZAÇÃO EM TEMPO REAL — onSnapshot + carga inicial (seed)
+   ============================================================ */
+var seedGuard = { technicians: false, spreadsheets: false };
+
+function stripId(obj) { var copy = Object.assign({}, obj); delete copy.id; return copy; }
+
+/* Seeds de planilha genérica trazem `dados` como array 2D (conveniente de
+   ler/manter no código-fonte); aqui ele é achatado para o formato aceito
+   pelo Firestore antes da gravação (ver gridToFirestoreFields). */
+function sheetToFirestorePayload(sheet) {
+  var copy = stripId(sheet);
+  if (copy.tipo === 'generic' && Array.isArray(copy.dados)) {
+    var flat = gridToFirestoreFields(copy.dados);
+    delete copy.dados;
+    copy.linhas = flat.linhas; copy.colunas = flat.colunas; copy.celulas = flat.celulas;
+  }
+  return copy;
+}
+
+function seedTechniciansToFirestore() {
+  Promise.all(seedTechnicians().map(function (t) { return fsAddDoc(fsCollection(db, 'technicians'), stripId(t)); }))
+    .catch(function (err) { reportDataError(err, 'Não foi possível popular os técnicos iniciais.'); });
+}
+function seedSpreadsheetsToFirestore() {
+  Promise.all(seedSpreadsheets().map(function (s) { return fsAddDoc(fsCollection(db, 'spreadsheets'), sheetToFirestorePayload(s)); }))
+    .catch(function (err) { reportDataError(err, 'Não foi possível popular as planilhas iniciais.'); });
+}
+function resetDemoData() {
+  // Trava o seed-guard antes de apagar: sem isso, o esvaziamento momentâneo
+  // das coleções dispara o auto-seed do onSnapshot em paralelo com o reseed
+  // abaixo, duplicando tudo.
+  seedGuard.technicians = true; seedGuard.spreadsheets = true;
+  return Promise.all(STATE.technicians.map(function (t) { return fsDeleteDoc(fsDoc(db, 'technicians', t.id)); }))
+    .then(function () { return Promise.all(STATE.spreadsheets.map(function (s) { return fsDeleteDoc(fsDoc(db, 'spreadsheets', s.id)); })); })
+    .then(function () { return Promise.all(seedTechnicians().map(function (t) { return fsAddDoc(fsCollection(db, 'technicians'), stripId(t)); })); })
+    .then(function () { return Promise.all(seedSpreadsheets().map(function (s) { return fsAddDoc(fsCollection(db, 'spreadsheets'), sheetToFirestorePayload(s)); })); })
+    .then(function () { return true; })
+    .catch(function (err) { return reportDataError(err, 'Não foi possível restaurar os dados de demonstração.'); });
+}
+
+function handleTechniciansUpdate() {
+  if (!session.managerId) return;
+  if (session.view === 'tecnicos') updateTecnicosData();
+  if (session.modal && session.modal.type === 'profile') refreshProfileTabContent();
+  if (session.modal && session.modal.type === 'sheet-detail') refreshSheetDetailBody();
+}
+function handleSpreadsheetsUpdate() {
+  if (!session.managerId) return;
+  if (session.view === 'planilhas') renderSheetGrid();
+  if (session.modal && session.modal.type === 'sheet-detail') refreshSheetDetailBody();
+}
+
+function initFirestoreListeners() {
+  fsOnSnapshot(fsCollection(db, 'technicians'), function (snap) {
+    STATE.technicians = snap.docs.map(function (d) { return Object.assign({}, d.data(), { id: d.id }); });
+    session.techniciansLoaded = true;
+    if (snap.empty && !seedGuard.technicians) { seedGuard.technicians = true; seedTechniciansToFirestore(); }
+    handleTechniciansUpdate();
+  }, function (err) {
+    console.error('Falha ao sincronizar técnicos', err);
+    showToast('Falha ao sincronizar técnicos com o Firestore. Verifique as regras de segurança do projeto.', 'error');
+  });
+
+  fsOnSnapshot(fsCollection(db, 'spreadsheets'), function (snap) {
+    STATE.spreadsheets = snap.docs.map(function (d) {
+      var sheet = Object.assign({}, d.data(), { id: d.id });
+      if (sheet.tipo === 'generic' || sheet.tipo === 'excel-import') {
+        sheet.dados = firestoreFieldsToGrid(sheet);
+        delete sheet.linhas; delete sheet.colunas; delete sheet.celulas;
+      }
+      return sheet;
+    });
+    session.spreadsheetsLoaded = true;
+    if (snap.empty && !seedGuard.spreadsheets) { seedGuard.spreadsheets = true; seedSpreadsheetsToFirestore(); }
+    handleSpreadsheetsUpdate();
+  }, function (err) {
+    console.error('Falha ao sincronizar planilhas', err);
+    showToast('Falha ao sincronizar planilhas com o Firestore. Verifique as regras de segurança do projeto.', 'error');
+  });
+}
+
+/* ============================================================
+   ESTADO DE SESSÃO (não persistido)
+   ============================================================ */
+var session = { managerId: null, view: 'dashboard', profile: null, modal: null, editingMetrics: false, scheduleFormOpen: false, techniciansLoaded: false, spreadsheetsLoaded: false, addSheetSource: 'link' };
+function getCurrentManager() { var ms = getManagers(); for (var i = 0; i < ms.length; i++) if (ms[i].id === session.managerId) return ms[i]; return null; }
+
+/* ============================================================
+   CLASSES REUTILIZÁVEIS DE BOTÃO / INPUT
+   ============================================================ */
+var BTN_PRIMARY = 'inline-flex items-center justify-center gap-2 bg-trorange hover:bg-trorangedark text-white font-semibold text-sm px-4 py-2.5 rounded-lg shadow-sm hover:shadow-md hover:-translate-y-0.5 transition-all duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-trorange focus:ring-offset-2 disabled:opacity-60 disabled:pointer-events-none';
+var BTN_SECONDARY = 'inline-flex items-center justify-center gap-2 bg-trblue hover:bg-trbluelight text-white font-semibold text-sm px-4 py-2.5 rounded-lg shadow-sm hover:shadow-md transition-all duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-trblue focus:ring-offset-2 disabled:opacity-60 disabled:pointer-events-none';
+var BTN_GHOST = 'inline-flex items-center justify-center gap-2 bg-white hover:bg-gray-50 text-gray-800 border border-gray-300 font-semibold text-sm px-4 py-2.5 rounded-lg transition-all duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-gray-300 disabled:opacity-60 disabled:pointer-events-none';
+var BTN_DANGER = 'inline-flex items-center justify-center gap-2 bg-white hover:bg-red-50 text-red-600 border border-red-300 font-semibold text-sm px-4 py-2.5 rounded-lg transition-all duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-red-300 disabled:opacity-60 disabled:pointer-events-none';
+var BTN_LINK = 'inline-flex items-center gap-1 text-trorange hover:text-trorangedark font-semibold text-sm underline underline-offset-2 transition-colors duration-150';
+var INPUT_CLS = 'w-full border border-gray-300 rounded-lg px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-trorange focus:border-trorange transition-all duration-150';
+var CARD_CLS = 'bg-white rounded-xl shadow-sm border border-gray-100';
+
+/* ============================================================
+   TOAST
+   ============================================================ */
+function showToast(message, variant) {
+  var root = document.getElementById('toast-root');
+  var color = variant === 'error' ? 'bg-red-600' : (variant === 'info' ? 'bg-trblue' : 'bg-emerald-600');
+  var el = document.createElement('div');
+  el.className = color + ' text-white text-sm font-medium px-4 py-2.5 rounded-lg shadow-lg animate-toast-in flex items-center gap-2';
+  el.innerHTML = icon('check', 'w-4 h-4 shrink-0') + '<span>' + escapeHtml(message) + '</span>';
+  root.appendChild(el);
+  setTimeout(function () {
+    el.style.transition = 'opacity .25s ease, transform .25s ease';
+    el.style.opacity = '0'; el.style.transform = 'translateY(6px)';
+    setTimeout(function () { el.remove(); }, 260);
+  }, 2400);
+}
+
+/* ============================================================
+   TOGGLE SWITCH (componente reutilizável)
+   ============================================================ */
+function toggleSwitch(active, dataAttrs, extraCls) {
+  return '' +
+    '<button type="button" role="switch" aria-checked="' + (active ? 'true' : 'false') + '" ' + dataAttrs + ' class="' + (extraCls || '') + ' relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-trorange focus:ring-offset-1 ' + (active ? 'bg-trorange' : 'bg-gray-300') + '">' +
+      '<span class="inline-block h-4 w-4 transform rounded-full bg-white shadow transition-transform duration-300 ease-in-out ' + (active ? 'translate-x-6' : 'translate-x-1') + '"></span>' +
+    '</button>';
+}
+
+/* ============================================================
+   MODAL SHELL (fecho/animação compartilhados)
+   ============================================================ */
+function modalShell(innerHtml, sizeCls, opts) {
+  opts = opts || {};
+  // Modais "fixedHeight" (hoje só o perfil do técnico) usam uma casca de altura
+  // travada com flex-col: cabeçalho/abas ficam fixos e só o conteúdo interno rola.
+  // Isso evita que o modal mude de tamanho (e "pisque") ao trocar de aba.
+  var sizingCls = opts.fixedHeight ? 'h-[85vh] flex flex-col overflow-hidden' : 'max-h-[90vh] overflow-y-auto';
+  return '' +
+    '<div class="fixed inset-0 z-50 flex items-center justify-center p-4 bg-trblue/60 backdrop-blur-sm animate-fade-in" data-role="overlay">' +
+      '<div class="w-full ' + (sizeCls || 'max-w-lg') + ' ' + sizingCls + ' bg-trbg rounded-2xl shadow-2xl animate-fade-scale" role="dialog" aria-modal="true">' +
+        innerHtml +
+      '</div>' +
+    '</div>';
+}
+function modalHeader(title, subtitle) {
+  return '' +
+    '<div class="shrink-0 sticky top-0 bg-trblue text-white px-6 py-4 rounded-t-2xl flex items-start gap-3 z-10">' +
+      '<div class="flex-1 min-w-0">' +
+        '<h2 class="text-base font-bold truncate">' + escapeHtml(title) + '</h2>' +
+        (subtitle ? '<p class="text-xs text-white/70 mt-0.5 truncate">' + escapeHtml(subtitle) + '</p>' : '') +
+      '</div>' +
+      '<button type="button" data-action="close-modal" aria-label="Fechar" class="shrink-0 p-1.5 rounded-full hover:bg-white/15 transition-colors duration-150 focus:outline-none focus:ring-2 focus:ring-white/60">' + icon('close', 'w-5 h-5') + '</button>' +
+    '</div>';
+}
+
+/* ============================================================
+   LOGIN
+   ============================================================ */
+function LoginScreen() {
+  var cards = getManagers().map(function (m) {
+    return '' +
+      '<button type="button" data-action="select-manager" data-manager-id="' + m.id + '" class="group bg-white border-2 border-gray-100 hover:border-trorange rounded-2xl p-6 flex flex-col items-center gap-2 shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all duration-300 ease-in-out focus:outline-none focus:ring-2 focus:ring-trorange">' +
+        '<span class="w-14 h-14 rounded-full bg-trorange text-white flex items-center justify-center font-bold text-lg group-hover:scale-110 transition-transform duration-300">' + escapeHtml(initials(m.nome)) + '</span>' +
+        '<span class="font-semibold text-trblue text-sm">' + escapeHtml(m.nome) + '</span>' +
+        '<span class="text-xs text-gray-500">' + escapeHtml(m.cargo) + ' &middot; ' + escapeHtml(m.setor) + '</span>' +
+      '</button>';
+  }).join('');
+  return '' +
+    '<div class="min-h-[70vh] flex items-center justify-center px-4 py-16">' +
+      '<div class="max-w-lg w-full text-center animate-fade-scale">' +
+        '<h1 class="text-2xl font-extrabold text-trblue">Gestão de Equipes</h1>' +
+        '<p class="text-sm text-gray-500 mt-2">Selecione seu perfil de gestor para continuar. <em>(login simulado &mdash; protótipo)</em></p>' +
+        '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4 mt-8">' + cards + '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+/* ============================================================
+   TOPBAR / NAV
+   ============================================================ */
+function renderTopbarSession() {
+  var root = document.getElementById('topbar-session');
+  var manager = getCurrentManager();
+  if (!manager) { root.innerHTML = ''; return; }
+  root.innerHTML = '' +
+    '<span class="hidden sm:flex items-center gap-2 bg-white/10 rounded-full pl-1 pr-3 py-1">' +
+      '<span class="w-6 h-6 rounded-full bg-trorange text-white text-[11px] font-bold flex items-center justify-center">' + escapeHtml(initials(manager.nome)) + '</span>' +
+      '<span class="text-xs font-medium">' + escapeHtml(manager.nome) + '</span>' +
+    '</span>' +
+    '<button type="button" data-action="reset-demo" class="text-white/80 hover:text-white text-xs font-medium px-2.5 py-1.5 rounded-md hover:bg-white/10 transition-colors duration-150">Resetar dados</button>' +
+    '<button type="button" data-action="logout" class="flex items-center gap-1.5 text-white/80 hover:text-white text-xs font-medium px-2.5 py-1.5 rounded-md hover:bg-white/10 transition-colors duration-150">' + icon('logout', 'w-4 h-4') + '<span class="hidden sm:inline">Trocar gestor</span></button>';
+}
+function navItem(view, label, iconName) {
+  var active = session.view === view;
+  return '' +
+    '<button type="button" data-action="nav-goto" data-view="' + view + '" class="flex items-center gap-2.5 px-3 py-2.5 rounded-lg text-sm font-medium whitespace-nowrap transition-all duration-200 ease-in-out ' +
+      (active ? 'bg-trorange text-white shadow-sm' : 'text-white/80 hover:text-white hover:bg-white/10') + '">' +
+      icon(iconName, 'w-5 h-5 shrink-0') + '<span>' + label + '</span>' +
+    '</button>';
+}
+function renderNav() {
+  var root = document.getElementById('nav-root');
+  if (!session.managerId) { root.innerHTML = ''; return; }
+  root.innerHTML = navItem('dashboard', 'Dashboard', 'dashboard') + navItem('tecnicos', 'Técnicos', 'user') + navItem('agenda', 'Agenda', 'calendar') + navItem('planilhas', 'Planilhas e Matrizes', 'sheet');
+}
+
+/* ============================================================
+   ALERTAS (dashboard)
+   ============================================================ */
+function computeAlerts(techs) {
+  var alerts = [];
+  var pending = 0;
+  techs.forEach(function (t) { t.treinamentos.forEach(function (e) { if (e.status === 'pendente') pending++; }); });
+  if (pending > 0) alerts.push({ level: 'warning', text: pending + ' treinamento(s) pendente(s) na equipe.' });
+  techs.forEach(function (t) { if (t.metricas.slaPercentual < 90) alerts.push({ level: 'critical', text: t.nome + ' está com SLA abaixo de 90% (' + t.metricas.slaPercentual + '%).' }); });
+  var now = new Date();
+  techs.forEach(function (t) {
+    if (!t.timeline.length) { alerts.push({ level: 'info', text: 'Nenhum acompanhamento registrado ainda para ' + t.nome + '.' }); return; }
+    var last = t.timeline.reduce(function (latest, e) { return (!latest || e.inicio > latest) ? e.inicio : latest; }, null);
+    var days = Math.floor((now - new Date(last)) / 86400000);
+    if (days > 21) alerts.push({ level: 'info', text: 'Sem acompanhamento recente para ' + t.nome + ' (há ' + days + ' dias).' });
+  });
+  return alerts;
+}
+function alertsListHtml(alerts) {
+  if (!alerts.length) return '<p class="text-sm text-gray-500 italic">Nenhum alerta no momento.</p>';
+  var dot = { info: 'bg-trblue', warning: 'bg-amber-500', critical: 'bg-red-600' };
+  return '<ul class="flex flex-col gap-2">' + alerts.map(function (a) {
+    return '<li class="flex items-center gap-2.5 text-sm text-gray-800 bg-trbg px-3 py-2 rounded-lg"><span class="w-2 h-2 rounded-full shrink-0 ' + dot[a.level] + '"></span>' + escapeHtml(a.text) + '</li>';
+  }).join('') + '</ul>';
+}
+
+/* ============================================================
+   DASHBOARD
+   ============================================================ */
+function EmployeeCard(tech) {
+  var m = tech.metricas;
+  var pct = m.metaAtendimentos ? Math.round((m.atendimentosMes / m.metaAtendimentos) * 100) : 0;
+  var barColor = pct >= 100 ? 'bg-emerald-500' : (pct >= 80 ? 'bg-amber-500' : 'bg-red-500');
+  var pctColor = pct >= 100 ? 'text-emerald-600' : (pct >= 80 ? 'text-amber-600' : 'text-red-600');
+  var filasPreview = tech.filas.slice(0, 3).map(function (fid) {
+    var q = getQueueById(fid); return q ? '<span class="bg-trbg border border-gray-200 text-gray-700 text-[11px] px-2 py-0.5 rounded-full">' + escapeHtml(q.codigo) + '</span>' : '';
+  }).join('');
+  var extra = tech.filas.length > 3 ? '<span class="border border-trorange text-trorange text-[11px] px-2 py-0.5 rounded-full">+' + (tech.filas.length - 3) + '</span>' : '';
+  var openTasks = tech.tarefas.filter(function (tk) { return tk.status === 'andamento'; }).length;
+  return '' +
+    '<article data-action="open-profile" data-tech-id="' + tech.id + '" tabindex="0" role="button" aria-label="Ver perfil de ' + escapeHtml(tech.nome) + '" class="group bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-lg hover:-translate-y-1 hover:border-trorange/40 transition-all duration-300 ease-in-out cursor-pointer p-4 flex flex-col gap-3 focus:outline-none focus:ring-2 focus:ring-trorange">' +
+      '<div class="flex items-center gap-3">' +
+        '<span class="w-10 h-10 rounded-full bg-trorange text-white flex items-center justify-center font-bold text-sm shrink-0 group-hover:scale-105 transition-transform duration-300">' + escapeHtml(tech.avatarIniciais) + '</span>' +
+        '<div class="min-w-0">' +
+          '<h3 class="font-semibold text-trblue text-sm truncate">' + escapeHtml(tech.nome) + '</h3>' +
+          '<p class="text-xs text-gray-500 truncate">' + escapeHtml(tech.cargo) + '</p>' +
+        '</div>' +
+      '</div>' +
+      '<div class="flex flex-wrap gap-1.5">' + (filasPreview || '<span class="text-xs text-gray-500 italic">Sem filas vinculadas</span>') + extra + '</div>' +
+      '<div class="flex items-center gap-2">' +
+        '<span class="text-[11px] text-gray-500 whitespace-nowrap">Meta do mês</span>' +
+        '<div class="flex-1 h-1.5 rounded-full bg-gray-200 overflow-hidden"><div class="h-full rounded-full ' + barColor + '" style="width:' + Math.min(pct, 100) + '%"></div></div>' +
+        '<span class="text-xs font-bold ' + pctColor + '">' + pct + '%</span>' +
+      '</div>' +
+      (openTasks ? '<div class="text-[11px] text-trorange font-semibold">' + openTasks + ' tarefa(s) em andamento</div>' : '') +
+    '</article>';
+}
+
+function TecnicosView() {
+  return '' +
+    '<div class="flex flex-col gap-6">' +
+      '<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">' +
+        '<div class="' + CARD_CLS + ' p-5"><span class="text-xs font-semibold uppercase tracking-wide text-gray-500">Técnicos ativos</span><div class="text-3xl font-extrabold text-trblue mt-1" id="stat-tecnicos">0</div></div>' +
+        '<div class="' + CARD_CLS + ' p-5"><span class="text-xs font-semibold uppercase tracking-wide text-gray-500">Atingimento médio da meta</span><div class="text-3xl font-extrabold text-trblue mt-1" id="stat-meta">0%</div></div>' +
+        '<div class="' + CARD_CLS + ' p-5"><span class="text-xs font-semibold uppercase tracking-wide text-gray-500">Alertas ativos</span><div class="text-3xl font-extrabold text-trblue mt-1" id="stat-alertas">0</div></div>' +
+      '</div>' +
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<h2 class="text-sm font-bold text-trblue mb-3">Alertas</h2>' +
+        '<div id="alerts-list"></div>' +
+      '</div>' +
+      '<div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">' +
+        '<div class="relative flex-1 max-w-md">' +
+          icon('search', 'w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2') +
+          '<input type="search" id="dash-search" placeholder="Buscar por nome do técnico ou por fila (ex.: Fila 41)" class="' + INPUT_CLS + ' pl-9" aria-label="Buscar técnico ou fila" />' +
+        '</div>' +
+        '<button type="button" data-action="open-add-tech-modal" class="' + BTN_PRIMARY + '">' + icon('plus', 'w-4 h-4') + 'Novo técnico</button>' +
+      '</div>' +
+      '<div id="tech-grid" class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4"></div>' +
+    '</div>';
+}
+
+function updateTecnicosData() {
+  var manager = getCurrentManager(); if (!manager) return;
+  if (!session.techniciansLoaded) {
+    var loadingGrid = document.getElementById('tech-grid');
+    if (loadingGrid) loadingGrid.innerHTML = spinnerHtml('col-span-full');
+    return;
+  }
+  var allTechs = getTechniciansBySetor(manager.setor);
+  var searchEl = document.getElementById('dash-search');
+  var query = searchEl ? searchEl.value.trim().toLowerCase() : '';
+  var techs = allTechs;
+  if (query) {
+    techs = allTechs.filter(function (t) {
+      if (t.nome.toLowerCase().indexOf(query) !== -1) return true;
+      return t.filas.some(function (fid) { var q = getQueueById(fid); return q && (q.codigo.toLowerCase().indexOf(query) !== -1 || q.descricao.toLowerCase().indexOf(query) !== -1); });
+    });
+  }
+  var grid = document.getElementById('tech-grid');
+  if (grid) grid.innerHTML = techs.length ? techs.map(EmployeeCard).join('') : '<p class="text-sm text-gray-500 italic col-span-full">Nenhum técnico encontrado para esta busca.</p>';
+
+  var statTec = document.getElementById('stat-tecnicos'); if (statTec) statTec.textContent = allTechs.length;
+  var statMeta = document.getElementById('stat-meta');
+  if (statMeta) {
+    var avg = allTechs.length ? Math.round(allTechs.reduce(function (s, t) { var m = t.metricas; return s + (m.metaAtendimentos ? m.atendimentosMes / m.metaAtendimentos * 100 : 0); }, 0) / allTechs.length) : 0;
+    statMeta.textContent = avg + '%';
+  }
+  var alerts = computeAlerts(allTechs);
+  var statAl = document.getElementById('stat-alertas'); if (statAl) statAl.textContent = alerts.length;
+  var alertsList = document.getElementById('alerts-list'); if (alertsList) alertsList.innerHTML = alertsListHtml(alerts);
+}
+
+/* ============================================================
+   COCKPIT OPS — dashboard de BI com Chart.js (dados mockados)
+   Inspirado no dashboard de BI oficial: linha de KPIs, gráfico principal
+   largo (Volume vs TMA) e uma faixa inferior com 3 gráficos menores.
+   As instâncias do Chart.js ficam em COCKPIT_CHARTS para poderem ser
+   destruídas ao sair/re-renderizar a view (evita "Canvas is already in use").
+   ============================================================ */
+var COCKPIT_CHARTS = {};
+function destroyCockpitCharts() {
+  Object.keys(COCKPIT_CHARTS).forEach(function (k) { if (COCKPIT_CHARTS[k]) COCKPIT_CHARTS[k].destroy(); });
+  COCKPIT_CHARTS = {};
+}
+
+/* Plugin local (não-global) que desenha um texto centralizado sobre o
+   donut — usado para marcar "100%" no meio do gráfico de status. */
+var cockpitCenterTextPlugin = {
+  id: 'cockpitCenterText',
+  afterDraw: function (chart) {
+    var cfg = chart.config.options.plugins && chart.config.options.plugins.centerText;
+    if (!cfg) return;
+    var ctx = chart.ctx, w = chart.width, h = chart.height;
+    ctx.save();
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.font = '700 22px Inter, system-ui, sans-serif';
+    ctx.fillStyle = cfg.color || '#011B36';
+    ctx.fillText(cfg.text, w / 2, h / 2 - 8);
+    if (cfg.subtext) {
+      ctx.font = '600 11px Inter, system-ui, sans-serif';
+      ctx.fillStyle = '#6b7280';
+      ctx.fillText(cfg.subtext, w / 2, h / 2 + 12);
+    }
+    ctx.restore();
+  }
+};
+
+function cockpitKpiCard(label, value, sublabel, accentCls, iconName) {
+  return '' +
+    '<div class="' + CARD_CLS + ' p-5 flex items-center gap-4">' +
+      '<span class="w-11 h-11 rounded-xl ' + accentCls + ' text-white flex items-center justify-center shrink-0">' + icon(iconName, 'w-5 h-5') + '</span>' +
+      '<div class="min-w-0">' +
+        '<span class="text-xs font-semibold uppercase tracking-wide text-gray-500">' + escapeHtml(label) + '</span>' +
+        '<div class="text-2xl font-extrabold text-trblue mt-0.5 truncate">' + escapeHtml(value) + '</div>' +
+        (sublabel ? '<div class="text-[11px] text-gray-500 mt-0.5">' + escapeHtml(sublabel) + '</div>' : '') +
+      '</div>' +
+    '</div>';
+}
+
+function CockpitView() {
+  return '' +
+    '<div class="flex flex-col gap-6">' +
+      '<div>' +
+        '<h2 class="text-lg font-bold text-trblue">Cockpit OPS</h2>' +
+        '<p class="text-sm text-gray-500">Visão em tempo real da operação de suporte técnico. <em>(dados simulados &mdash; protótipo)</em></p>' +
+      '</div>' +
+
+      '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">' +
+        cockpitKpiCard('TMA', '1min 42s', 'Tempo médio de atendimento', 'bg-trblue', 'clock') +
+        cockpitKpiCard('TME', '6min 15s', 'Tempo médio de espera', 'bg-trbluelight', 'clock') +
+        cockpitKpiCard('Indisponibilidade', '4,8%', 'Últimas 10 horas', 'bg-red-600', 'alert') +
+        cockpitKpiCard('Volume', '72', 'Chamados em atendimento hoje', 'bg-trorange', 'chart') +
+      '</div>' +
+
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<h3 class="text-sm font-bold text-trblue mb-3">Volume vs TMA &middot; últimas 10 horas</h3>' +
+        '<div class="h-80"><canvas id="cockpit-chart-main"></canvas></div>' +
+      '</div>' +
+
+      '<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">' +
+        '<div class="' + CARD_CLS + ' p-5">' +
+          '<h3 class="text-sm font-bold text-trblue mb-3">Atendimentos por fila &middot; hoje</h3>' +
+          '<div class="h-56"><canvas id="cockpit-chart-bar"></canvas></div>' +
+        '</div>' +
+        '<div class="' + CARD_CLS + ' p-5">' +
+          '<h3 class="text-sm font-bold text-trblue mb-3">Indisponibilidade &middot; tendência</h3>' +
+          '<div class="h-56"><canvas id="cockpit-chart-line-mini"></canvas></div>' +
+        '</div>' +
+        '<div class="' + CARD_CLS + ' p-5">' +
+          '<h3 class="text-sm font-bold text-trblue mb-3">Status dos chamados</h3>' +
+          '<div class="h-56"><canvas id="cockpit-chart-donut"></canvas></div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+/* Instancia os 4 gráficos do Cockpit OPS. Precisa rodar DEPOIS do HTML dos
+   <canvas> já estar no DOM (ver renderView). Dados são mock estáticos de
+   uma operação de suporte técnico — sem dependência do Firestore/STATE. */
+function renderCockpitCharts() {
+  if (typeof Chart === 'undefined') { console.error('Chart.js não carregou — verifique o CDN no <head>.'); return; }
+  destroyCockpitCharts();
+
+  var mainCanvas = document.getElementById('cockpit-chart-main');
+  if (mainCanvas) {
+    COCKPIT_CHARTS.main = new Chart(mainCanvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'],
+        datasets: [
+          { type: 'bar', label: 'Volume', data: [58, 64, 71, 69, 52, 60, 75, 82, 78, 65], backgroundColor: 'rgba(214,64,0,0.75)', borderRadius: 4, maxBarThickness: 34, yAxisID: 'yVolume', order: 2 },
+          { type: 'line', label: 'TMA (min)', data: [1.6, 1.5, 1.8, 2.0, 2.3, 1.9, 1.7, 1.5, 1.4, 1.6], borderColor: '#011B36', backgroundColor: '#011B36', pointBackgroundColor: '#011B36', tension: 0.35, borderWidth: 2.5, pointRadius: 3, yAxisID: 'yTma', order: 1 }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { position: 'top', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } } },
+        scales: {
+          yVolume: { position: 'left', beginAtZero: true, grid: { color: '#eef0f2' }, title: { display: true, text: 'Volume', font: { size: 10 } } },
+          yTma: { position: 'right', beginAtZero: true, grid: { display: false }, title: { display: true, text: 'TMA (min)', font: { size: 10 } } },
+          x: { grid: { display: false } }
+        }
+      }
+    });
+  }
+
+  var barCanvas = document.getElementById('cockpit-chart-bar');
+  if (barCanvas) {
+    COCKPIT_CHARTS.bar = new Chart(barCanvas.getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels: ['Fila 41', 'Fila 51', 'Fila 61', 'Fila 31', 'Fila 42'],
+        datasets: [{ label: 'Atendimentos', data: [34, 28, 22, 19, 15], backgroundColor: ['#D64000', '#011B36', '#D64000', '#011B36', '#D64000'], borderRadius: 4, maxBarThickness: 28 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, grid: { color: '#eef0f2' } }, x: { grid: { display: false } } }
+      }
+    });
+  }
+
+  var lineMiniCanvas = document.getElementById('cockpit-chart-line-mini');
+  if (lineMiniCanvas) {
+    COCKPIT_CHARTS.lineMini = new Chart(lineMiniCanvas.getContext('2d'), {
+      type: 'line',
+      data: {
+        labels: ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'],
+        datasets: [{ label: 'Indisponibilidade (%)', data: [3.2, 4.1, 5.0, 4.8, 3.9, 4.5, 5.2, 4.8, 4.3, 4.0], borderColor: '#D64000', backgroundColor: 'rgba(214,64,0,0.12)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: { y: { beginAtZero: true, grid: { color: '#eef0f2' }, ticks: { font: { size: 10 } } }, x: { grid: { display: false }, ticks: { font: { size: 9 } } } }
+      }
+    });
+  }
+
+  var donutCanvas = document.getElementById('cockpit-chart-donut');
+  if (donutCanvas) {
+    COCKPIT_CHARTS.donut = new Chart(donutCanvas.getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Concluídos', 'Pendentes', 'Aguardando SS'],
+        datasets: [{ data: [72, 20, 8], backgroundColor: ['#D64000', '#011B36', '#9CA3AF'], borderWidth: 0, hoverOffset: 4 }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false, cutout: '72%',
+        plugins: {
+          legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } },
+          centerText: { text: '100%', subtext: 'dos chamados', color: '#011B36' }
+        }
+      },
+      plugins: [cockpitCenterTextPlugin]
+    });
+  }
+}
+
+/* ============================================================
+   AGENDA — mockup visual (sem lógica de datas/recorrência real)
+   Grade semanal (Segunda a Sexta, 08h-17h) com compromissos falsos
+   posicionados via CSS absoluto dentro de cada coluna de dia.
+   ============================================================ */
+var AGENDA_HOURS = ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'];
+var AGENDA_DAYS = [
+  { label: 'Segunda', data: '31/08' },
+  { label: 'Terça', data: '01/09' },
+  { label: 'Quarta', data: '02/09' },
+  { label: 'Quinta', data: '03/09' },
+  { label: 'Sexta', data: '04/09' }
+];
+/* Índice = posição em AGENDA_DAYS. "start" é o índice em AGENDA_HOURS
+   (linha onde o compromisso começa); cada linha equivale a 56px (h-14). */
+var AGENDA_EVENTS = {
+  0: [
+    { start: 1, span: 1, title: '1:1 com Artur', time: '09h – 10h', accent: 'bg-trorange' },
+    { start: 6, span: 1, title: 'Revisão de SLA — Fila 51', time: '14h – 15h', accent: 'bg-trblue' }
+  ],
+  1: [
+    { start: 2, span: 1, title: 'Reunião de Alinhamento Fiscont', time: '10h – 11h', accent: 'bg-trblue' }
+  ],
+  2: [
+    { start: 1, span: 1, title: 'Acompanhamento — Bruna', time: '09h – 10h', accent: 'bg-trorange' },
+    { start: 7, span: 1, title: 'Treinamento: Onvio Avançado', time: '15h – 16h', accent: 'bg-emerald-600' }
+  ],
+  3: [
+    { start: 3, span: 1, title: '1:1 com Rafael', time: '11h – 12h', accent: 'bg-trorange' }
+  ],
+  4: [
+    { start: 6, span: 1, title: 'Retro semanal da equipe', time: '14h – 15h', accent: 'bg-trblue' }
+  ]
+};
+function agendaDayColumn(dayIndex, day) {
+  var rowLines = AGENDA_HOURS.map(function () { return '<div class="h-14 border-b border-gray-100"></div>'; }).join('');
+  var events = (AGENDA_EVENTS[dayIndex] || []).map(function (ev) {
+    return '' +
+      '<div class="absolute left-1 right-1 rounded-lg ' + ev.accent + ' text-white text-[11px] font-semibold px-2 py-1.5 shadow-sm leading-tight overflow-hidden" style="top:' + (ev.start * 56) + 'px; height:' + (ev.span * 56 - 4) + 'px;">' +
+        escapeHtml(ev.title) + '<br><span class="font-normal opacity-80">' + ev.time + '</span>' +
+      '</div>';
+  }).join('');
+  return '' +
+    '<div class="min-w-[150px]">' +
+      '<div class="h-12 border-b border-gray-200 flex flex-col items-center justify-center bg-trbg/60">' +
+        '<span class="text-xs font-bold text-trblue">' + escapeHtml(day.label) + '</span>' +
+        '<span class="text-[10px] text-gray-400">' + escapeHtml(day.data) + '</span>' +
+      '</div>' +
+      '<div class="relative">' + rowLines + events + '</div>' +
+    '</div>';
+}
+function AgendaView() {
+  var timeGutter = '' +
+    '<div class="w-14 shrink-0 border-r border-gray-200">' +
+      '<div class="h-12 border-b border-gray-200"></div>' +
+      AGENDA_HOURS.map(function (h) { return '<div class="h-14 border-b border-gray-100 flex items-start justify-end pr-2 pt-1 text-[11px] text-gray-400">' + h + '</div>'; }).join('') +
+    '</div>';
+  var dayColumns = AGENDA_DAYS.map(function (d, i) { return agendaDayColumn(i, d); }).join('');
+  return '' +
+    '<div class="flex flex-col gap-6">' +
+      '<div>' +
+        '<h2 class="text-lg font-bold text-trblue">Agenda</h2>' +
+        '<p class="text-sm text-gray-500">Compromissos da semana. <em>(mockup visual &mdash; protótipo)</em></p>' +
+      '</div>' +
+      '<div class="rounded-xl border border-trblue/15 bg-trblue/5 px-4 py-3 flex items-center gap-3">' +
+        icon('calendar', 'w-4 h-4 text-trblue shrink-0') +
+        '<p class="text-xs sm:text-sm text-trblue font-medium">Integração nativa com Microsoft Teams e Outlook em desenvolvimento.</p>' +
+      '</div>' +
+      '<div class="' + CARD_CLS + ' overflow-x-auto">' +
+        '<div class="flex min-w-[720px]">' + timeGutter + '<div class="flex-1 grid grid-cols-5 divide-x divide-gray-200">' + dayColumns + '</div></div>' +
+      '</div>' +
+    '</div>';
+}
+
+/* ============================================================
+   PERFIL DO TÉCNICO — MODAL GRANDE COM ABAS
+   ============================================================ */
+var PROFILE_TABS = [
+  { id: 'geral', label: 'Visão Geral' },
+  { id: 'filas', label: 'Matriz de Filas' },
+  { id: 'metricas', label: 'Métricas e Metas' },
+  { id: 'treinamentos', label: 'Treinamentos' },
+  { id: 'timeline', label: 'Linha do Tempo' },
+  { id: 'tarefas', label: 'Tarefas' }
+];
+
+var TAB_BTN_BASE = 'px-3.5 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-all duration-200 ';
+var TAB_BTN_ACTIVE = 'bg-trorange text-white shadow-sm';
+var TAB_BTN_INACTIVE = 'text-gray-600 hover:text-trblue hover:bg-trbg';
+function profileTabButton(tab, active) {
+  return '<button type="button" data-action="switch-tab" data-tab="' + tab.id + '" class="' + TAB_BTN_BASE + (active ? TAB_BTN_ACTIVE : TAB_BTN_INACTIVE) + '">' + tab.label + '</button>';
+}
+
+/* Corpo de cada aba, isolado do "casco" do modal (cabeçalho + barra de abas)
+   para permitir atualização parcial do DOM (ver refreshProfileTabContent). */
+function computeProfileTabBody(tech, tab) {
+  switch (tab) {
+    case 'filas': return tabFilas(tech);
+    case 'metricas': return tabMetricas(tech);
+    case 'treinamentos': return tabTreinamentos(tech);
+    case 'timeline': return tabTimeline(tech);
+    case 'tarefas': return tabTarefas(tech);
+    default: return tabGeral(tech);
+  }
+}
+
+/* Atualiza só o conteúdo da aba ativa (não mexe no cabeçalho nem na barra de
+   abas), evitando re-renderizar o modal inteiro e re-disparar a animação de
+   entrada a cada interação (toggle de fila, salvar métricas, registrar ação...). */
+function refreshProfileTabContent() {
+  if (!session.profile) return;
+  var tech = getTechnicianById(session.profile.techId);
+  if (!tech) { closeModal(); return; }
+  var content = document.getElementById('profile-tab-content');
+  if (content) content.innerHTML = computeProfileTabBody(tech, session.profile.tab);
+}
+
+/* Troca apenas as classes dos botões de aba para refletir qual está ativa. */
+function updateProfileTabButtons(activeTab) {
+  var bar = document.getElementById('profile-tabs-bar');
+  if (!bar) return;
+  bar.querySelectorAll('[data-action="switch-tab"]').forEach(function (btn) {
+    btn.className = TAB_BTN_BASE + (btn.dataset.tab === activeTab ? TAB_BTN_ACTIVE : TAB_BTN_INACTIVE);
+  });
+}
+
+function tabGeral(tech) {
+  var m = tech.metricas;
+  var pct = m.metaAtendimentos ? Math.round((m.atendimentosMes / m.metaAtendimentos) * 100) : 0;
+  var filaChips = tech.filas.length ? tech.filas.map(function (fid) { var q = getQueueById(fid); return q ? '<span class="bg-trbg border border-gray-200 text-gray-700 text-xs px-2.5 py-1 rounded-full">' + escapeHtml(q.codigo) + '</span>' : ''; }).join('') : '<span class="text-sm text-gray-500 italic">Nenhuma fila vinculada.</span>';
+  return '' +
+    '<div class="flex flex-col gap-5">' +
+      '<div class="flex flex-wrap items-start gap-4">' +
+        '<span class="w-16 h-16 rounded-full bg-trorange text-white flex items-center justify-center font-bold text-xl shrink-0">' + escapeHtml(tech.avatarIniciais) + '</span>' +
+        '<div class="flex-1 min-w-[200px]">' +
+          '<h3 class="text-lg font-bold text-trblue">' + escapeHtml(tech.nome) + '</h3>' +
+          '<p class="text-sm text-gray-500">' + escapeHtml(tech.cargo) + ' &middot; Setor ' + escapeHtml(tech.setor) + ' &middot; ' + escapeHtml(tech.tempoDeCasa) + ' de casa</p>' +
+        '</div>' +
+        '<div class="flex gap-2">' +
+          '<button type="button" data-action="open-edit-tech-modal" data-tech-id="' + tech.id + '" class="' + BTN_GHOST + '">' + icon('edit', 'w-4 h-4') + 'Editar dados</button>' +
+          '<button type="button" data-action="request-delete-technician" data-tech-id="' + tech.id + '" class="' + BTN_DANGER + '">' + icon('trash', 'w-4 h-4') + 'Excluir</button>' +
+        '</div>' +
+      '</div>' +
+
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<h4 class="text-sm font-bold text-trblue mb-3">Resumo executivo</h4>' +
+        '<form data-action="submit-summary" class="flex flex-col gap-3">' +
+          '<textarea name="resumoExecutivo" rows="3" class="' + INPUT_CLS + '" placeholder="Resumo sobre o perfil e momento do técnico...">' + escapeHtml(tech.resumoExecutivo) + '</textarea>' +
+          '<button type="submit" class="' + BTN_SECONDARY + ' self-start">Salvar resumo</button>' +
+        '</form>' +
+      '</div>' +
+
+      '<div class="grid grid-cols-2 sm:grid-cols-4 gap-3">' +
+        '<div class="' + CARD_CLS + ' p-4 text-center"><div class="text-xl font-extrabold text-trblue">' + m.atendimentosMes + '</div><div class="text-[11px] text-gray-500 mt-0.5">Atend. / ' + m.metaAtendimentos + '</div></div>' +
+        '<div class="' + CARD_CLS + ' p-4 text-center"><div class="text-xl font-extrabold text-trblue">' + pct + '%</div><div class="text-[11px] text-gray-500 mt-0.5">Da meta</div></div>' +
+        '<div class="' + CARD_CLS + ' p-4 text-center"><div class="text-xl font-extrabold text-trblue">' + m.slaPercentual + '%</div><div class="text-[11px] text-gray-500 mt-0.5">SLA</div></div>' +
+        '<div class="' + CARD_CLS + ' p-4 text-center"><div class="text-xl font-extrabold text-trblue">' + m.csat + '</div><div class="text-[11px] text-gray-500 mt-0.5">CSAT / 5</div></div>' +
+      '</div>' +
+
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<h4 class="text-sm font-bold text-trblue mb-3">Filas atendidas <span class="font-normal text-gray-500">(gerencie na aba Matriz de Filas)</span></h4>' +
+        '<div class="flex flex-wrap gap-2">' + filaChips + '</div>' +
+      '</div>' +
+    '</div>';
+}
+
+function tabFilas(tech) {
+  var byCat = {};
+  QUEUES.forEach(function (q) { (byCat[q.categoria] = byCat[q.categoria] || []).push(q); });
+  var sections = Object.keys(byCat).map(function (cat) {
+    var rows = byCat[cat].map(function (q) {
+      var active = tech.filas.indexOf(q.id) !== -1;
+      return '' +
+        '<div class="flex items-center justify-between gap-3 py-2.5 border-b border-gray-100 last:border-0">' +
+          '<div class="min-w-0"><span class="font-semibold text-trblue text-sm">' + escapeHtml(q.codigo) + '</span><p class="text-xs text-gray-500 truncate">' + escapeHtml(q.descricao) + '</p></div>' +
+          toggleSwitch(active, 'data-action="toggle-fila" data-fila-id="' + q.id + '"') +
+        '</div>';
+    }).join('');
+    return '<div class="' + CARD_CLS + ' p-5"><h4 class="text-xs font-bold uppercase tracking-wide text-gray-500 mb-1">' + escapeHtml(cat) + '</h4>' + rows + '</div>';
+  }).join('<div class="h-4"></div>');
+  return '<div class="flex flex-col">' + sections + '</div>';
+}
+
+function tabMetricas(tech) {
+  var m = tech.metricas;
+  if (session.editingMetrics) {
+    return '' +
+      '<form data-action="submit-metrics" class="' + CARD_CLS + ' p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Atendimentos no mês<input type="number" min="0" name="atendimentosMes" value="' + m.atendimentosMes + '" required class="' + INPUT_CLS + '" /></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Meta de atendimentos<input type="number" min="0" name="metaAtendimentos" value="' + m.metaAtendimentos + '" required class="' + INPUT_CLS + '" /></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">SLA cumprido (%)<input type="number" min="0" max="100" name="slaPercentual" value="' + m.slaPercentual + '" required class="' + INPUT_CLS + '" /></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">CSAT (0-5)<input type="number" min="0" max="5" step="0.1" name="csat" value="' + m.csat + '" required class="' + INPUT_CLS + '" /></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">TME (min)<input type="number" min="0" name="tmeMinutos" value="' + m.tmeMinutos + '" required class="' + INPUT_CLS + '" /></label>' +
+        '<div class="flex items-end gap-2"><button type="submit" class="' + BTN_PRIMARY + '">Salvar métricas</button><button type="button" data-action="cancel-edit-metrics" class="' + BTN_GHOST + '">Cancelar</button></div>' +
+      '</form>';
+  }
+  var pct = m.metaAtendimentos ? Math.round((m.atendimentosMes / m.metaAtendimentos) * 100) : 0;
+  var barColor = pct >= 100 ? 'bg-emerald-500' : (pct >= 80 ? 'bg-amber-500' : 'bg-red-500');
+  return '' +
+    '<div class="flex flex-col gap-4">' +
+      '<div class="grid grid-cols-2 sm:grid-cols-4 gap-4">' +
+        '<div class="' + CARD_CLS + ' p-4"><div class="text-xs font-semibold uppercase text-gray-500">Atendimentos</div><div class="text-2xl font-extrabold text-trblue mt-1">' + m.atendimentosMes + ' <span class="text-sm font-normal text-gray-500">/ ' + m.metaAtendimentos + '</span></div><div class="h-1.5 rounded-full bg-gray-200 mt-2 overflow-hidden"><div class="h-full ' + barColor + '" style="width:' + Math.min(pct, 100) + '%"></div></div></div>' +
+        '<div class="' + CARD_CLS + ' p-4"><div class="text-xs font-semibold uppercase text-gray-500">SLA cumprido</div><div class="text-2xl font-extrabold text-trblue mt-1">' + m.slaPercentual + '%</div></div>' +
+        '<div class="' + CARD_CLS + ' p-4"><div class="text-xs font-semibold uppercase text-gray-500">CSAT</div><div class="text-2xl font-extrabold text-trblue mt-1">' + m.csat + ' <span class="text-sm font-normal text-gray-500">/ 5</span></div></div>' +
+        '<div class="' + CARD_CLS + ' p-4"><div class="text-xs font-semibold uppercase text-gray-500">TME</div><div class="text-2xl font-extrabold text-trblue mt-1">' + m.tmeMinutos + ' <span class="text-sm font-normal text-gray-500">min</span></div></div>' +
+      '</div>' +
+      '<button type="button" data-action="edit-metrics" class="' + BTN_LINK + ' self-start">Ajustar indicadores</button>' +
+    '</div>';
+}
+
+function tabTreinamentos(tech) {
+  var groups = { concluido: [], agendado: [], pendente: [] };
+  tech.treinamentos.forEach(function (e) { (groups[e.status] || groups.pendente).push(e); });
+  function row(e) {
+    var badge = { concluido: 'bg-emerald-100 text-emerald-800', agendado: 'bg-trblue/10 text-trblue', pendente: 'bg-amber-100 text-amber-800' }[e.status];
+    var label = { concluido: 'Concluído', agendado: 'Agendado', pendente: 'Pendente' }[e.status];
+    return '' +
+      '<div class="flex items-center justify-between gap-3 py-2.5 border-b border-gray-100 last:border-0">' +
+        '<div class="min-w-0"><span class="text-sm font-medium text-gray-900">' + escapeHtml(e.nome) + '</span>' + (e.data ? '<span class="text-xs text-gray-500 ml-2">' + formatDateBr(e.data) + '</span>' : '') + '</div>' +
+        '<div class="flex items-center gap-2 shrink-0">' +
+          '<span class="text-[11px] font-bold px-2 py-0.5 rounded-full ' + badge + '">' + label + '</span>' +
+          (e.status !== 'concluido' ? '<button type="button" data-action="mark-training-complete" data-entry-id="' + e.id + '" class="text-emerald-600 hover:text-emerald-700" title="Marcar concluído">' + icon('check', 'w-4 h-4') + '</button>' : '') +
+          '<button type="button" data-action="delete-training-entry" data-entry-id="' + e.id + '" class="text-gray-400 hover:text-red-600" title="Remover">' + icon('close', 'w-4 h-4') + '</button>' +
+        '</div>' +
+      '</div>';
+  }
+  var scheduleForm = session.scheduleFormOpen ? (
+    '<form data-action="submit-schedule-training" class="' + CARD_CLS + ' p-4 mt-3 flex flex-wrap gap-3 items-end">' +
+      '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1 flex-1 min-w-[180px]">Treinamento<input list="training-catalog" name="nome" required class="' + INPUT_CLS + '" placeholder="Nome do treinamento" /></label>' +
+      '<datalist id="training-catalog">' + TRAINING_NAMES.map(function (n) { return '<option value="' + escapeHtml(n) + '"></option>'; }).join('') + '</datalist>' +
+      '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Data<input type="date" name="data" required value="' + todayIso() + '" class="' + INPUT_CLS + '" /></label>' +
+      '<button type="submit" class="' + BTN_PRIMARY + '">Agendar</button>' +
+      '<button type="button" data-action="cancel-schedule-training" class="' + BTN_GHOST + '">Cancelar</button>' +
+    '</form>'
+  ) : '';
+  return '' +
+    '<div class="flex flex-col gap-4">' +
+      '<div class="flex items-center justify-between">' +
+        '<h4 class="text-sm font-bold text-trblue">Central de treinamentos</h4>' +
+        (!session.scheduleFormOpen ? '<button type="button" data-action="toggle-schedule-form" class="' + BTN_PRIMARY + '">' + icon('plus', 'w-4 h-4') + 'Agendar novo</button>' : '') +
+      '</div>' +
+      scheduleForm +
+      '<div class="' + CARD_CLS + ' p-5"><h5 class="text-xs font-bold uppercase text-gray-500 mb-1">Concluídos</h5>' + (groups.concluido.length ? groups.concluido.map(row).join('') : '<p class="text-sm text-gray-500 italic py-1">Nenhum treinamento concluído ainda.</p>') + '</div>' +
+      '<div class="' + CARD_CLS + ' p-5"><h5 class="text-xs font-bold uppercase text-gray-500 mb-1">Agendados</h5>' + (groups.agendado.length ? groups.agendado.map(row).join('') : '<p class="text-sm text-gray-500 italic py-1">Nenhum treinamento agendado.</p>') + '</div>' +
+      '<div class="' + CARD_CLS + ' p-5"><h5 class="text-xs font-bold uppercase text-gray-500 mb-1">Pendentes</h5>' + (groups.pendente.length ? groups.pendente.map(row).join('') : '<p class="text-sm text-gray-500 italic py-1">Nenhuma pendência.</p>') + '</div>' +
+    '</div>';
+}
+
+function tabTimeline(tech) {
+  var items = tech.timeline.length ? tech.timeline.map(function (e) {
+    var dur = formatDuration(minutesBetween(e.inicio, e.fim));
+    return '' +
+      '<li class="relative pl-5 pb-5 border-l-2 border-gray-200 last:pb-0">' +
+        '<span class="absolute -left-[7px] top-0.5 w-3 h-3 rounded-full bg-trorange border-2 border-white shadow"></span>' +
+        '<div class="flex flex-wrap items-center gap-2">' +
+          '<span class="font-bold text-trblue text-sm">' + escapeHtml(e.tipo) + '</span>' +
+          '<span class="text-xs text-gray-500">' + formatDateTimeBr(e.inicio) + (e.fim ? ' &rarr; ' + formatDateTimeBr(e.fim) : '') + (dur ? ' &middot; ' + dur : '') + '</span>' +
+          '<button type="button" data-action="delete-timeline" data-entry-id="' + e.id + '" class="ml-auto text-gray-400 hover:text-red-600" title="Remover">' + icon('close', 'w-4 h-4') + '</button>' +
+        '</div>' +
+        '<p class="text-sm text-gray-800 mt-1">' + escapeHtml(e.observacoes) + '</p>' +
+      '</li>';
+  }).join('') : '<p class="text-sm text-gray-500 italic">Nenhum registro de ação ainda.</p>';
+  return '' +
+    '<div class="flex flex-col gap-5">' +
+      '<form data-action="submit-timeline" class="' + CARD_CLS + ' p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1 sm:col-span-2">Tipo de ação<select name="tipo" required class="' + INPUT_CLS + '">' + ACTION_TYPES.map(function (t) { return '<option value="' + t + '">' + t + '</option>'; }).join('') + '</select></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Data/hora de início<input type="datetime-local" name="inicio" required value="' + nowLocalInputValue() + '" class="' + INPUT_CLS + '" /></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Data/hora de fim <span class="font-normal text-gray-400">(opcional)</span><input type="datetime-local" name="fim" class="' + INPUT_CLS + '" /></label>' +
+        '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1 sm:col-span-2">Resultados obtidos / observações<textarea name="observacoes" rows="2" required class="' + INPUT_CLS + '"></textarea></label>' +
+        '<button type="submit" class="' + BTN_PRIMARY + ' sm:col-span-2 self-start">Registrar ação</button>' +
+      '</form>' +
+      '<ul class="' + CARD_CLS + ' p-5">' + items + '</ul>' +
+    '</div>';
+}
+
+function tabTarefas(tech) {
+  function card(tk) {
+    var isDone = tk.status === 'concluida';
+    return '' +
+      '<div class="' + CARD_CLS + ' p-3.5 flex items-start gap-2">' +
+        '<div class="flex-1 min-w-0"><p class="text-sm font-medium text-gray-900 ' + (isDone ? 'line-through text-gray-500' : '') + '">' + escapeHtml(tk.titulo) + '</p><p class="text-[11px] text-gray-500 mt-0.5">' + formatDateBr(tk.criadaEm) + '</p></div>' +
+        '<div class="flex items-center gap-1 shrink-0">' +
+          (isDone
+            ? '<button type="button" data-action="set-task-status" data-task-id="' + tk.id + '" data-status="andamento" class="text-trblue hover:text-trbluelight" title="Reabrir">' + icon('undo', 'w-4 h-4') + '</button>'
+            : '<button type="button" data-action="set-task-status" data-task-id="' + tk.id + '" data-status="concluida" class="text-emerald-600 hover:text-emerald-700" title="Concluir">' + icon('check', 'w-4 h-4') + '</button>') +
+          '<button type="button" data-action="delete-task" data-task-id="' + tk.id + '" class="text-gray-400 hover:text-red-600" title="Remover">' + icon('close', 'w-4 h-4') + '</button>' +
+        '</div>' +
+      '</div>';
+  }
+  var andamento = tech.tarefas.filter(function (t) { return t.status === 'andamento'; });
+  var concluidas = tech.tarefas.filter(function (t) { return t.status === 'concluida'; });
+  return '' +
+    '<div class="flex flex-col gap-4">' +
+      '<form data-action="submit-add-task" class="flex gap-2">' +
+        '<input type="text" name="titulo" required placeholder="Descreva a nova tarefa..." class="' + INPUT_CLS + ' flex-1" />' +
+        '<button type="submit" class="' + BTN_PRIMARY + ' shrink-0">' + icon('plus', 'w-4 h-4') + 'Atribuir</button>' +
+      '</form>' +
+      '<div class="grid grid-cols-1 sm:grid-cols-2 gap-4">' +
+        '<div><h4 class="text-xs font-bold uppercase text-gray-500 mb-2">Em andamento (' + andamento.length + ')</h4><div class="flex flex-col gap-2">' + (andamento.length ? andamento.map(card).join('') : '<p class="text-sm text-gray-500 italic">Nenhuma tarefa em andamento.</p>') + '</div></div>' +
+        '<div><h4 class="text-xs font-bold uppercase text-gray-500 mb-2">Concluídas (' + concluidas.length + ')</h4><div class="flex flex-col gap-2">' + (concluidas.length ? concluidas.map(card).join('') : '<p class="text-sm text-gray-500 italic">Nenhuma tarefa concluída ainda.</p>') + '</div></div>' +
+      '</div>' +
+    '</div>';
+}
+
+function ProfileModal() {
+  var tech = session.profile ? getTechnicianById(session.profile.techId) : null;
+  if (!tech) { session.profile = null; session.modal = null; return ''; }
+  var tab = session.profile.tab || 'geral';
+  var tabsHtml = PROFILE_TABS.map(function (t) { return profileTabButton(t, t.id === tab); }).join('');
+  var body = computeProfileTabBody(tech, tab);
+  var inner = modalHeader(tech.nome, tech.cargo + ' · Setor ' + tech.setor) +
+    '<div id="profile-tabs-bar" class="shrink-0 px-4 sm:px-6 pt-4 pb-3 flex gap-1.5 overflow-x-auto border-b border-gray-200 bg-trbg">' + tabsHtml + '</div>' +
+    '<div id="profile-tab-content" class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">' + body + '</div>';
+  return modalShell(inner, 'max-w-4xl', { fixedHeight: true });
+}
+
+/* ============================================================
+   MODAIS PEQUENOS — Novo técnico / Editar técnico
+   ============================================================ */
+var CARGO_OPTIONS = ['Aprendiz', 'Técnico de Suporte', 'Analista de Suporte', 'Analista de Suporte Sênior', 'Especialista de Suporte'];
+function techFormFields(defaults) {
+  defaults = defaults || {};
+  var cargoValido = CARGO_OPTIONS.indexOf(defaults.cargo) !== -1;
+  var cargoOptionsHtml = '<option value="" disabled' + (cargoValido ? '' : ' selected') + '>Selecione o cargo</option>' +
+    CARGO_OPTIONS.map(function (c) { return '<option value="' + c + '"' + (c === defaults.cargo ? ' selected' : '') + '>' + c + '</option>'; }).join('');
+  return '' +
+    '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Nome completo<input type="text" name="nome" required value="' + escapeHtml(defaults.nome || '') + '" class="' + INPUT_CLS + '" /></label>' +
+    '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Cargo<select name="cargo" required class="' + INPUT_CLS + '">' + cargoOptionsHtml + '</select></label>' +
+    '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Tempo de casa<input type="text" name="tempoDeCasa" placeholder="Ex: 3 meses" value="' + escapeHtml(defaults.tempoDeCasa || '') + '" class="' + INPUT_CLS + '" /></label>';
+}
+function AddTechModal() {
+  var manager = getCurrentManager();
+  var inner = modalHeader('Novo técnico', 'Setor ' + manager.setor) +
+    '<form data-action="submit-add-tech" class="p-6 flex flex-col gap-4">' +
+      techFormFields() +
+      '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Meta de atendimentos (mês)<input type="number" name="metaAtendimentos" min="0" value="100" class="' + INPUT_CLS + '" /></label>' +
+      '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Resumo executivo inicial<textarea name="resumoExecutivo" rows="2" class="' + INPUT_CLS + '"></textarea></label>' +
+      '<div class="flex gap-2 pt-1"><button type="submit" class="' + BTN_PRIMARY + ' flex-1">Adicionar técnico</button><button type="button" data-action="close-modal" class="' + BTN_GHOST + '">Cancelar</button></div>' +
+    '</form>';
+  return modalShell(inner, 'max-w-md');
+}
+function EditTechModal() {
+  var tech = getTechnicianById(session.modal.techId);
+  if (!tech) { session.modal = null; return ''; }
+  var inner = modalHeader('Editar técnico', tech.setor) +
+    '<form data-action="submit-edit-tech" data-tech-id="' + tech.id + '" class="p-6 flex flex-col gap-4">' +
+      techFormFields(tech) +
+      '<div class="flex gap-2 pt-1"><button type="submit" class="' + BTN_PRIMARY + ' flex-1">Salvar alterações</button><button type="button" data-action="close-modal" class="' + BTN_GHOST + '">Cancelar</button></div>' +
+    '</form>';
+  return modalShell(inner, 'max-w-md');
+}
+
+/* ============================================================
+   CONFIRMAÇÃO (substitui window.confirm)
+   ============================================================ */
+function ConfirmModal() {
+  var m = session.modal;
+  var inner = '' +
+    '<div class="p-6 flex flex-col gap-4">' +
+      '<div class="flex items-center gap-3">' +
+        '<span class="w-10 h-10 rounded-full bg-red-100 text-red-600 flex items-center justify-center shrink-0">' + icon('trash', 'w-5 h-5') + '</span>' +
+        '<h3 class="text-base font-bold text-trblue">' + escapeHtml(m.title) + '</h3>' +
+      '</div>' +
+      '<p class="text-sm text-gray-800">' + escapeHtml(m.message) + '</p>' +
+      '<div class="flex gap-2 justify-end pt-1">' +
+        '<button type="button" data-action="close-modal" class="' + BTN_GHOST + '">Cancelar</button>' +
+        '<button type="button" data-action="confirm-yes" class="' + BTN_DANGER + ' !bg-red-600 !text-white !border-red-600 hover:!bg-red-700">' + escapeHtml(m.confirmLabel || 'Excluir') + '</button>' +
+      '</div>' +
+    '</div>';
+  return modalShell(inner, 'max-w-sm');
+}
+function openConfirm(opts) { session.modal = Object.assign({ type: 'confirm' }, opts); renderModal(); }
+
+/* ============================================================
+   PLANILHAS — grid de cards + detalhe
+   ============================================================ */
+function spreadsheetIcon(tipo) {
+  if (tipo === 'filas') return icon('sheet', 'w-8 h-8 text-trorange');
+  if (tipo === 'treinamentos') return icon('check', 'w-8 h-8 text-trorange');
+  if (tipo === 'google-sheet') return icon('sheet', 'w-8 h-8 text-emerald-600');
+  if (tipo === 'excel-import') return icon('sheet', 'w-8 h-8 text-green-700');
+  return icon('sheet', 'w-8 h-8 text-trblue');
+}
+function SpreadsheetCard(sheet) {
+  var removable = sheet.tipo === 'generic' || sheet.tipo === 'google-sheet' || sheet.tipo === 'excel-import';
+  return '' +
+    '<div class="group relative bg-white rounded-2xl border-2 border-gray-100 hover:border-trorange/50 overflow-hidden shadow-sm hover:shadow-lg hover:-translate-y-1 transition-all duration-300 ease-in-out cursor-pointer" data-action="open-spreadsheet" data-sheet-id="' + sheet.id + '">' +
+      (removable ? '<button type="button" data-action="request-remove-spreadsheet" data-sheet-id="' + sheet.id + '" title="Remover planilha" class="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 focus:opacity-100 transition-opacity duration-200 bg-white/90 hover:bg-red-50 text-gray-500 hover:text-red-600 rounded-full p-1.5 shadow">' + icon('trash', 'w-4 h-4') + '</button>' : '') +
+      '<div class="h-28 flex items-center justify-center bg-trbg">' + spreadsheetIcon(sheet.tipo) + '</div>' +
+      '<div class="border-t-2 border-trorange py-3 px-3 text-center">' +
+        '<span class="font-semibold text-trblue text-sm">' + escapeHtml(sheet.nome) + '</span>' +
+      '</div>' +
+    '</div>';
+}
+function PlanilhasView() {
+  return '' +
+    '<div class="flex flex-col gap-6">' +
+      '<div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between">' +
+        '<div class="relative flex-1 max-w-md">' +
+          icon('search', 'w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2') +
+          '<input type="search" id="sheet-search" placeholder="Pesquisar/filtrar planilhas..." class="' + INPUT_CLS + ' pl-9" aria-label="Pesquisar planilhas" />' +
+        '</div>' +
+        '<button type="button" data-action="open-add-sheet-modal" class="' + BTN_PRIMARY + '">' + icon('plus', 'w-4 h-4') + 'Importar / nova planilha</button>' +
+      '</div>' +
+      '<div id="sheet-grid" class="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-5"></div>' +
+    '</div>';
+}
+function renderSheetGrid() {
+  var grid = document.getElementById('sheet-grid');
+  if (!grid) return;
+  if (!session.spreadsheetsLoaded) { grid.innerHTML = spinnerHtml('col-span-full'); return; }
+  var query = (document.getElementById('sheet-search') || {}).value || '';
+  query = query.trim().toLowerCase();
+  var list = STATE.spreadsheets.filter(function (s) { return !query || s.nome.toLowerCase().indexOf(query) !== -1; });
+  grid.innerHTML = list.length ? list.map(SpreadsheetCard).join('') : '<p class="col-span-full text-sm text-gray-500 italic">Nenhuma planilha encontrada.</p>';
+}
+
+function spreadsheetDetailInner(sheet) {
+  var manager = getCurrentManager();
+  var techs = getTechniciansBySetor(manager.setor);
+  if (sheet.tipo === 'filas') {
+    var head = '<th class="sticky left-0 bg-trblue text-white text-xs font-bold px-3 py-2 text-left z-10">Técnico</th>' + QUEUES.map(function (q) { return '<th class="bg-trblue text-white text-[11px] font-bold px-2 py-2 text-center whitespace-nowrap">' + escapeHtml(q.codigo) + '</th>'; }).join('');
+    var rows = techs.map(function (t) {
+      return '<tr class="odd:bg-white even:bg-trbg">' +
+        '<td class="sticky left-0 odd:bg-white even:bg-trbg text-sm font-medium text-gray-900 px-3 py-2 whitespace-nowrap z-10">' + escapeHtml(t.nome) + '</td>' +
+        QUEUES.map(function (q) {
+          var active = t.filas.indexOf(q.id) !== -1;
+          return '<td class="px-2 py-2 text-center">' + toggleSwitch(active, 'data-action="toggle-fila" data-tech-id="' + t.id + '" data-fila-id="' + q.id + '"') + '</td>';
+        }).join('') + '</tr>';
+    }).join('');
+    return '<div class="overflow-x-auto rounded-xl border border-gray-200"><table class="min-w-full border-collapse"><thead><tr>' + head + '</tr></thead><tbody>' + rows + '</tbody></table></div>';
+  }
+  if (sheet.tipo === 'treinamentos') {
+    var head2 = '<th class="sticky left-0 bg-trblue text-white text-xs font-bold px-3 py-2 text-left z-10">Técnico</th>' + TRAINING_NAMES.map(function (n) { return '<th class="bg-trblue text-white text-[11px] font-bold px-2 py-2 text-center">' + escapeHtml(n) + '</th>'; }).join('');
+    var rows2 = techs.map(function (t) {
+      return '<tr class="odd:bg-white even:bg-trbg">' +
+        '<td class="sticky left-0 odd:bg-white even:bg-trbg text-sm font-medium text-gray-900 px-3 py-2 whitespace-nowrap z-10">' + escapeHtml(t.nome) + '</td>' +
+        TRAINING_NAMES.map(function (n) {
+          var entry = t.treinamentos.find(function (e) { return e.nome === n; });
+          var done = !!entry && entry.status === 'concluido';
+          return '<td class="px-2 py-2 text-center">' + toggleSwitch(done, 'data-action="toggle-training-matrix" data-tech-id="' + t.id + '" data-nome="' + escapeHtml(n) + '"') + '</td>';
+        }).join('') + '</tr>';
+    }).join('');
+    return '<p class="text-xs text-gray-500 mb-3">Marcado = treinamento concluído. Agendamentos e pendências detalhadas ficam no perfil do técnico.</p><div class="overflow-x-auto rounded-xl border border-gray-200"><table class="min-w-full border-collapse"><thead><tr>' + head2 + '</tr></thead><tbody>' + rows2 + '</tbody></table></div>';
+  }
+  if (sheet.tipo === 'google-sheet') {
+    var src = 'https://docs.google.com/spreadsheets/d/' + sheet.sheetId + '/edit?rm=minimal';
+    return '<iframe src="' + escapeHtml(src) + '" class="w-full h-full min-h-[600px] rounded-xl border border-gray-200" title="' + escapeHtml(sheet.nome) + '" loading="lazy"></iframe>';
+  }
+  if (sheet.tipo === 'excel-import') {
+    var rowsX = sheet.dados.map(function (row, r) {
+      var isHeader = r === 0;
+      return '<tr>' + row.map(function (cell) {
+        return '<' + (isHeader ? 'th' : 'td') + ' contenteditable="false" class="' + (isHeader ? 'bg-trblue text-white font-bold' : 'bg-white text-gray-900 odd:bg-white even:bg-trbg') + ' text-sm px-3 py-2 border border-gray-200 min-w-[110px]">' + escapeHtml(cell) + '</' + (isHeader ? 'th' : 'td') + '>';
+      }).join('') + '</tr>';
+    }).join('');
+    return '<p class="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-3">Visualização estática. Para editar, atualize a planilha original e faça um novo upload.</p><div class="overflow-x-auto rounded-xl border border-gray-200"><table class="min-w-full border-collapse">' + rowsX + '</table></div>';
+  }
+  // tipo genérico: tabela editável (contenteditable)
+  var rowsG = sheet.dados.map(function (row, r) {
+    return '<tr>' + row.map(function (cell, c) {
+      var isHeader = r === 0;
+      return '<' + (isHeader ? 'th' : 'td') + ' contenteditable="true" spellcheck="false" data-action="edit-generic-cell" data-sheet-id="' + sheet.id + '" data-row="' + r + '" data-col="' + c + '" class="' + (isHeader ? 'bg-trblue text-white font-bold' : 'bg-white text-gray-900 odd:bg-white even:bg-trbg') + ' text-sm px-3 py-2 border border-gray-200 min-w-[110px] focus:bg-white">' + escapeHtml(cell) + '</' + (isHeader ? 'th' : 'td') + '>';
+    }).join('') + '</tr>';
+  }).join('');
+  return '<p class="text-xs text-gray-500 mb-3">Clique em uma célula para editar. As alterações são salvas automaticamente.</p><div class="overflow-x-auto rounded-xl border border-gray-200"><table class="min-w-full border-collapse">' + rowsG + '</table></div>';
+}
+function SpreadsheetDetailModal() {
+  var sheet = STATE.spreadsheets.find(function (s) { return s.id === session.modal.sheetId; });
+  if (!sheet) { session.modal = null; return ''; }
+  var subtitle = sheet.tipo === 'google-sheet' ? 'Google Sheets incorporado · edições são salvas direto na planilha original' :
+    sheet.tipo === 'excel-import' ? 'Arquivo importado · somente leitura' :
+    'Planilha sincronizada em tempo real (Firestore) · edições refletem no dashboard';
+  var inner = modalHeader(sheet.nome, subtitle) +
+    '<div id="sheet-detail-body" class="flex-1 min-h-0 overflow-y-auto p-4 sm:p-6">' + spreadsheetDetailInner(sheet) + '</div>';
+  return modalShell(inner, 'max-w-5xl', { fixedHeight: true });
+}
+/* Atualiza só o corpo do modal de detalhe da planilha (mesma lógica da
+   refreshProfileTabContent): evita re-renderizar o modal inteiro — e
+   re-disparar a animação de entrada — quando o Firestore ecoa uma
+   mudança feita por este ou por outro usuário em tempo real. */
+function refreshSheetDetailBody() {
+  if (!session.modal || session.modal.type !== 'sheet-detail') return;
+  var sheet = STATE.spreadsheets.find(function (s) { return s.id === session.modal.sheetId; });
+  if (!sheet) { closeModal(); return; }
+  var body = document.getElementById('sheet-detail-body');
+  if (body) body.innerHTML = spreadsheetDetailInner(sheet);
+}
+/* Campo(s) que mudam conforme a origem escolhida (link vs. upload). Ficam
+   isolados num helper para poderem ser re-renderizados sozinhos (ver
+   case 'switch-sheet-source') sem perder o que já foi digitado no campo
+   "Nome da planilha", que fica fora deste bloco. */
+function addSheetSourceField() {
+  if (session.addSheetSource === 'upload') {
+    return '' +
+      '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Arquivo (Excel/CSV)<input type="file" name="arquivo" accept=".xlsx,.xls,.csv" required class="' + INPUT_CLS + '" /></label>' +
+      '<p class="text-xs text-gray-500">O arquivo é convertido e salvo como uma cópia estática (somente leitura) dentro do ALIA.</p>';
+  }
+  return '' +
+    '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Link do Google Sheets<input type="url" name="link" required placeholder="Cole o link de compartilhamento aqui..." class="' + INPUT_CLS + '" /></label>' +
+    '<p class="text-xs text-gray-500">A planilha continua no Google Sheets — o ALIA só incorpora a visualização/edição dentro do sistema.</p>';
+}
+function sheetSourceTabButton(source, label) {
+  var active = session.addSheetSource === source;
+  return '<button type="button" data-action="switch-sheet-source" data-source="' + source + '" class="flex-1 ' + TAB_BTN_BASE + (active ? TAB_BTN_ACTIVE : TAB_BTN_INACTIVE) + '">' + label + '</button>';
+}
+function AddSpreadsheetModal() {
+  var inner = modalHeader('Nova planilha', 'Google Sheets ou upload de arquivo') +
+    '<form data-action="submit-add-sheet" class="p-6 flex flex-col gap-4">' +
+      '<div id="add-sheet-source-tabs" class="flex gap-1.5 bg-trbg rounded-lg p-1">' + sheetSourceTabButton('link', 'Link do Google Sheets') + sheetSourceTabButton('upload', 'Upload de arquivo (Excel)') + '</div>' +
+      '<label class="text-xs font-semibold text-gray-600 flex flex-col gap-1">Nome da planilha<input type="text" name="nome" required placeholder="Ex: Escala de Feriados" class="' + INPUT_CLS + '" /></label>' +
+      '<div id="add-sheet-source-field" class="flex flex-col gap-3">' + addSheetSourceField() + '</div>' +
+      '<div class="flex gap-2 pt-1"><button type="submit" class="' + BTN_PRIMARY + ' flex-1">Importar / criar</button><button type="button" data-action="close-modal" class="' + BTN_GHOST + '">Cancelar</button></div>' +
+    '</form>';
+  return modalShell(inner, 'max-w-md');
+}
+
+/* ============================================================
+   ORQUESTRAÇÃO DE RENDER
+   ============================================================ */
+function renderAll() {
+  renderTopbarSession();
+  renderNav();
+  document.getElementById('login-root').innerHTML = session.managerId ? '' : LoginScreen();
+  document.getElementById('shell').classList.toggle('hidden', !session.managerId);
+  if (session.managerId) renderView();
+  renderModal();
+}
+function renderView() {
+  var root = document.getElementById('view-root');
+  if (session.view === 'tecnicos') {
+    root.innerHTML = TecnicosView();
+    updateTecnicosData();
+  } else if (session.view === 'agenda') {
+    root.innerHTML = AgendaView();
+  } else if (session.view === 'planilhas') {
+    root.innerHTML = PlanilhasView();
+    renderSheetGrid();
+  } else {
+    // 'dashboard' (padrão) agora é o Cockpit OPS — ver requisito de
+    // reestruturação: o item "Dashboard" do menu abre direto o BI.
+    root.innerHTML = CockpitView();
+    renderCockpitCharts();
+  }
+}
+function renderModal() {
+  var root = document.getElementById('modal-root');
+  if (!session.modal) { root.innerHTML = ''; return; }
+  switch (session.modal.type) {
+    case 'profile': root.innerHTML = ProfileModal(); break;
+    case 'add-tech': root.innerHTML = AddTechModal(); break;
+    case 'edit-tech': root.innerHTML = EditTechModal(); break;
+    case 'confirm': root.innerHTML = ConfirmModal(); break;
+    case 'add-sheet': root.innerHTML = AddSpreadsheetModal(); break;
+    case 'sheet-detail': root.innerHTML = SpreadsheetDetailModal(); break;
+    default: root.innerHTML = '';
+  }
+}
+function openProfile(techId, tab) { session.modal = { type: 'profile' }; session.profile = { techId: techId, tab: tab || 'geral' }; session.editingMetrics = false; session.scheduleFormOpen = false; renderModal(); }
+function closeModal() { session.modal = null; session.profile = null; session.editingMetrics = false; session.scheduleFormOpen = false; renderModal(); }
+
+/* ============================================================
+   EVENTOS (delegação global)
+   ============================================================ */
+function formDataToObject(form) { var fd = new FormData(form), o = {}; fd.forEach(function (v, k) { o[k] = v; }); return o; }
+
+document.addEventListener('click', async function (e) {
+  if (e.target && e.target.getAttribute && e.target.getAttribute('data-role') === 'overlay') { closeModal(); return; }
+  var el = e.target.closest && e.target.closest('[data-action]');
+  if (!el) return;
+  var action = el.dataset.action;
+
+  switch (action) {
+    case 'select-manager':
+      session.managerId = el.dataset.managerId; session.view = 'dashboard'; renderAll(); break;
+    case 'logout':
+      session.managerId = null; closeModal(); renderAll(); break;
+    case 'reset-demo':
+      openConfirm({ title: 'Restaurar dados de demonstração', message: 'Todos os técnicos e planilhas no Firestore serão apagados e recriados com a carga inicial. Deseja continuar?', confirmLabel: 'Restaurar', confirmAction: 'reset-demo' });
+      break;
+    case 'nav-goto':
+      // navItem() já calcula o destaque a partir de session.view === view; o
+      // que faltava era re-renderizar o próprio menu após a troca (senão o
+      // laranja só aparecia depois de outra ação que disparasse renderAll()).
+      session.view = el.dataset.view; renderNav(); renderView(); break;
+    case 'open-profile':
+      openProfile(el.dataset.techId); break;
+    case 'close-modal':
+      closeModal(); break;
+    case 'switch-tab':
+      session.profile.tab = el.dataset.tab; session.editingMetrics = false; session.scheduleFormOpen = false;
+      updateProfileTabButtons(session.profile.tab); refreshProfileTabContent();
+      break;
+    case 'open-add-tech-modal':
+      session.modal = { type: 'add-tech' }; renderModal(); break;
+    case 'open-edit-tech-modal':
+      session.modal = { type: 'edit-tech', techId: el.dataset.techId }; renderModal(); break;
+    case 'request-delete-technician': {
+      var t = getTechnicianById(el.dataset.techId);
+      if (t) openConfirm({ title: 'Excluir técnico', message: 'Excluir "' + t.nome + '" da equipe? Esta ação não pode ser desfeita.', confirmLabel: 'Excluir técnico', confirmAction: 'delete-technician', payload: { techId: t.id } });
+      break;
+    }
+    // As mutações abaixo (toggle-fila, treinamentos, timeline, tarefas) só
+    // gravam no Firestore. A UI é atualizada quando o onSnapshot ecoa a
+    // mudança de volta (handleTechniciansUpdate), não aqui.
+    case 'toggle-fila': {
+      var techId = el.dataset.techId || (session.profile && session.profile.techId);
+      toggleFila(techId, el.dataset.filaId);
+      break;
+    }
+    case 'toggle-training-matrix': {
+      var isDone = el.getAttribute('aria-checked') !== 'true';
+      setTrainingMatrixCell(el.dataset.techId, el.dataset.nome, isDone);
+      break;
+    }
+    case 'edit-metrics': session.editingMetrics = true; refreshProfileTabContent(); break;
+    case 'cancel-edit-metrics': session.editingMetrics = false; refreshProfileTabContent(); break;
+    case 'toggle-schedule-form': session.scheduleFormOpen = true; refreshProfileTabContent(); break;
+    case 'cancel-schedule-training': session.scheduleFormOpen = false; refreshProfileTabContent(); break;
+    case 'mark-training-complete':
+      markTrainingComplete(session.profile.techId, el.dataset.entryId); break;
+    case 'delete-training-entry':
+      deleteTrainingEntry(session.profile.techId, el.dataset.entryId); break;
+    case 'delete-timeline':
+      deleteTimelineEntry(session.profile.techId, el.dataset.entryId); break;
+    case 'set-task-status':
+      setTaskStatus(session.profile.techId, el.dataset.taskId, el.dataset.status); break;
+    case 'delete-task':
+      deleteTask(session.profile.techId, el.dataset.taskId); break;
+    case 'open-add-sheet-modal':
+      session.addSheetSource = 'link'; session.modal = { type: 'add-sheet' }; renderModal(); break;
+    case 'switch-sheet-source': {
+      session.addSheetSource = el.dataset.source;
+      var sourceTabs = document.getElementById('add-sheet-source-tabs');
+      if (sourceTabs) sourceTabs.querySelectorAll('[data-action="switch-sheet-source"]').forEach(function (btn) {
+        btn.className = 'flex-1 ' + TAB_BTN_BASE + (btn.dataset.source === session.addSheetSource ? TAB_BTN_ACTIVE : TAB_BTN_INACTIVE);
+      });
+      var sourceField = document.getElementById('add-sheet-source-field');
+      if (sourceField) sourceField.innerHTML = addSheetSourceField();
+      break;
+    }
+    case 'open-spreadsheet':
+      session.modal = { type: 'sheet-detail', sheetId: el.dataset.sheetId }; renderModal(); break;
+    case 'request-remove-spreadsheet': {
+      var sh = STATE.spreadsheets.find(function (s) { return s.id === el.dataset.sheetId; });
+      openConfirm({ title: 'Remover planilha', message: 'Remover "' + (sh ? sh.nome : 'planilha') + '"? Esta ação não pode ser desfeita.', confirmLabel: 'Remover', confirmAction: 'remove-spreadsheet', payload: { sheetId: el.dataset.sheetId } });
+      break;
+    }
+    case 'confirm-yes': {
+      var pending = session.modal;
+      closeModal();
+      if (pending.confirmAction === 'delete-technician') {
+        var okDel = await deleteTechnician(pending.payload.techId);
+        if (okDel) showToast('Técnico excluído.');
+      } else if (pending.confirmAction === 'remove-spreadsheet') {
+        var okRemove = await deleteSpreadsheetRecord(pending.payload.sheetId);
+        if (okRemove) showToast('Planilha removida.');
+      } else if (pending.confirmAction === 'reset-demo') {
+        showToast('Restaurando dados de demonstração...', 'info');
+        var okReset = await resetDemoData();
+        if (okReset) { session.view = 'dashboard'; renderView(); showToast('Dados de demonstração restaurados.'); }
+      }
+      break;
+    }
+    default: break;
+  }
+});
+
+document.addEventListener('input', function (e) {
+  if (e.target.id === 'dash-search') updateTecnicosData();
+  if (e.target.id === 'sheet-search') renderSheetGrid();
+});
+
+document.addEventListener('keydown', function (e) {
+  if (e.target.matches && e.target.matches('[data-action="open-profile"]') && (e.key === 'Enter' || e.key === ' ')) {
+    e.preventDefault(); openProfile(e.target.dataset.techId);
+  }
+  if (e.key === 'Escape' && session.modal) closeModal();
+});
+
+document.addEventListener('focusout', function (e) {
+  if (e.target.matches && e.target.matches('[data-action="edit-generic-cell"]')) {
+    var sheetId = e.target.dataset.sheetId, r = Number(e.target.dataset.row), c = Number(e.target.dataset.col);
+    var value = e.target.textContent;
+    var sheet = STATE.spreadsheets.find(function (s) { return s.id === sheetId; });
+    if (!sheet) return;
+    var newDados = sheet.dados.map(function (row) { return row.slice(); });
+    newDados[r][c] = value;
+    syncSpreadsheetData(sheetId, { dados: newDados }).then(function (ok) { if (ok) showToast('Planilha salva.'); });
+  }
+});
+
+document.addEventListener('submit', async function (e) {
+  var form = e.target;
+  if (!form.dataset || !form.dataset.action) return;
+  e.preventDefault();
+  var data = formDataToObject(form);
+
+  switch (form.dataset.action) {
+    case 'submit-add-tech': {
+      var manager = getCurrentManager();
+      var submitBtnAdd = form.querySelector('button[type="submit"]'); var labelAdd = submitBtnAdd.textContent;
+      submitBtnAdd.disabled = true; submitBtnAdd.textContent = 'Salvando...';
+      var okAdd = await addTechnician({ nome: data.nome, cargo: data.cargo, setor: manager.setor, tempoDeCasa: data.tempoDeCasa, metaAtendimentos: data.metaAtendimentos, resumoExecutivo: data.resumoExecutivo });
+      if (okAdd) { closeModal(); showToast('Técnico adicionado.'); }
+      else { submitBtnAdd.disabled = false; submitBtnAdd.textContent = labelAdd; }
+      break;
+    }
+    case 'submit-edit-tech': {
+      var submitBtnEdit = form.querySelector('button[type="submit"]'); var labelEdit = submitBtnEdit.textContent;
+      submitBtnEdit.disabled = true; submitBtnEdit.textContent = 'Salvando...';
+      var okEdit = await updateTechnician(form.dataset.techId, { nome: data.nome, cargo: data.cargo, tempoDeCasa: data.tempoDeCasa });
+      if (okEdit) { closeModal(); showToast('Dados atualizados.'); }
+      else { submitBtnEdit.disabled = false; submitBtnEdit.textContent = labelEdit; }
+      break;
+    }
+    case 'submit-summary':
+      updateTechnician(session.profile.techId, { resumoExecutivo: data.resumoExecutivo }).then(function (ok) { if (ok) showToast('Resumo salvo.'); });
+      break;
+    case 'submit-metrics':
+      updateMetrics(session.profile.techId, { atendimentosMes: Number(data.atendimentosMes) || 0, metaAtendimentos: Number(data.metaAtendimentos) || 0, slaPercentual: Number(data.slaPercentual) || 0, csat: Number(data.csat) || 0, tmeMinutos: Number(data.tmeMinutos) || 0 }).then(function (ok) { if (ok) showToast('Métricas atualizadas.'); });
+      session.editingMetrics = false; refreshProfileTabContent();
+      break;
+    case 'submit-timeline':
+      addTimelineEntry(session.profile.techId, { tipo: data.tipo, inicio: data.inicio, fim: data.fim, observacoes: data.observacoes }).then(function (ok) { if (ok) showToast('Ação registrada.'); });
+      break;
+    case 'submit-schedule-training':
+      scheduleTraining(session.profile.techId, data.nome, data.data).then(function (ok) { if (ok) showToast('Treinamento agendado.'); });
+      session.scheduleFormOpen = false; refreshProfileTabContent();
+      break;
+    case 'submit-add-task':
+      addTask(session.profile.techId, data.titulo); break;
+    case 'submit-add-sheet': {
+      var submitBtnSheet = form.querySelector('button[type="submit"]');
+      if (session.addSheetSource === 'upload') {
+        var file = form.querySelector('input[name="arquivo"]').files[0];
+        if (!file) { showToast('Selecione um arquivo para importar.', 'error'); break; }
+        submitBtnSheet.disabled = true; submitBtnSheet.textContent = 'Importando...';
+        try {
+          var dadosExcel = await readSpreadsheetFile(file);
+          var okExcel = await createExcelImportRecord(data.nome, dadosExcel);
+          if (okExcel) { closeModal(); showToast('Planilha importada.'); }
+          else { submitBtnSheet.disabled = false; submitBtnSheet.textContent = 'Importar / criar'; }
+        } catch (err) {
+          reportDataError(err, 'Não foi possível ler o arquivo. Verifique se é um .xlsx, .xls ou .csv válido.');
+          submitBtnSheet.disabled = false; submitBtnSheet.textContent = 'Importar / criar';
+        }
+      } else {
+        var sheetId = extractGoogleSheetId(data.link);
+        if (!sheetId) { showToast('Link do Google Sheets inválido. Copie o link de compartilhamento completo.', 'error'); break; }
+        submitBtnSheet.disabled = true; submitBtnSheet.textContent = 'Importando...';
+        var okSheet = await createGoogleSheetRecord(data.nome, sheetId);
+        if (okSheet) { closeModal(); showToast('Planilha importada.'); }
+        else { submitBtnSheet.disabled = false; submitBtnSheet.textContent = 'Importar / criar'; }
+      }
+      break;
+    }
+    default: break;
+  }
+});
+
+/* ============================================================
+   INIT — aguarda o módulo Firebase (ver <head>) inicializar o app e o
+   Firestore antes de ligar os listeners em tempo real e renderizar.
+   ============================================================ */
+function bootAfterFirebase() {
+  var fb = window.__firestore;
+  db = fb.db; fsCollection = fb.collection; fsDoc = fb.doc; fsAddDoc = fb.addDoc; fsUpdateDoc = fb.updateDoc; fsDeleteDoc = fb.deleteDoc; fsOnSnapshot = fb.onSnapshot;
+  initFirestoreListeners();
+  renderAll();
+}
+if (window.__firestore) {
+  bootAfterFirebase();
+} else {
+  window.addEventListener('firebase-ready', bootAfterFirebase);
+}
+</script>
+</body>
+</html>
