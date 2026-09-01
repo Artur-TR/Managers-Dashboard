@@ -151,6 +151,7 @@ function initials(name) {
   return ((parts[0] ? parts[0][0] : '') + (parts.length > 1 ? parts[parts.length - 1][0] : '')).toUpperCase();
 }
 function todayIso() { return new Date().toISOString().slice(0, 10); }
+function subtractDaysIso(dias) { var d = new Date(); d.setDate(d.getDate() - dias); return d.toISOString().slice(0, 10); }
 function nowLocalInputValue() {
   var d = new Date();
   var tz = d.getTimezoneOffset();
@@ -339,6 +340,35 @@ function seedSpreadsheets() {
     }
   ];
 }
+
+/* ============================================================
+   MOCK — SGD (Central de Pendências, integração simulada)
+   Sem persistência no Firestore: é um retrato estático da fila de
+   chamados pendentes do sistema legado, gerado uma única vez em
+   PENDENCIAS_MOCK para os cards/tabela da view "Pendências".
+   ============================================================ */
+function generateMockPendencias() {
+  var rows = [
+    { numero: 4445706, dias: 16, modulo: 'Honorários', responsavel: 'Rafael Andrade Souza', sistema: 'Domínio Sistemas', assunto: 'Divergência no cálculo de honorários recorrentes do cliente' },
+    { numero: 4445711, dias: 14, modulo: 'Busca NF-e', responsavel: 'Carlos Eduardo Lima', sistema: 'Domínio Sistemas', assunto: 'Falha na busca automática de NF-e para múltiplas empresas' },
+    { numero: 4445715, dias: 11, modulo: 'Honorários', responsavel: 'Fernanda Alves Barreto', sistema: 'Domínio Sistemas', assunto: 'Boleto de honorários gerado com valor divergente do contrato' },
+    { numero: 4445720, dias: 9, modulo: 'Onvio Processos', responsavel: 'Rafael Andrade Souza', sistema: 'Onvio', assunto: 'Processo não sincroniza com o portal do cliente' },
+    { numero: 4445724, dias: 8, modulo: 'Simples Nacional', responsavel: 'Daniela Rocha Martins', sistema: 'Domínio Sistemas', assunto: 'Erro na apuração do DAS do Simples Nacional' },
+    { numero: 4445729, dias: 7, modulo: 'Busca NF-e', responsavel: 'Artur Seixas Pedro', sistema: 'Domínio Sistemas', assunto: 'Timeout ao consultar NF-e em lote' },
+    { numero: 4445733, dias: 7, modulo: 'Honorários', responsavel: 'Carlos Eduardo Lima', sistema: 'Domínio Sistemas', assunto: 'Reajuste de honorários não refletido na próxima fatura' },
+    { numero: 4445738, dias: 6, modulo: 'Auditor Fiscal', responsavel: 'Fernanda Alves Barreto', sistema: 'Domínio Sistemas', assunto: 'Inconsistência entre SPED Fiscal e apuração' },
+    { numero: 4445742, dias: 5, modulo: 'Acesso e Instalação', responsavel: 'Gabriel Henrique Nogueira', sistema: 'Domínio Sistemas', assunto: 'Cliente sem acesso após atualização de versão' },
+    { numero: 4445747, dias: 4, modulo: 'Onvio Processos', responsavel: 'Rafael Andrade Souza', sistema: 'Onvio', assunto: 'Dúvida sobre fluxo de aprovação de processos' },
+    { numero: 4445751, dias: 4, modulo: 'Honorários', responsavel: 'Daniela Rocha Martins', sistema: 'Domínio Sistemas', assunto: 'Cliente solicita segunda via de nota de honorários' },
+    { numero: 4445756, dias: 3, modulo: 'Simples Nacional', responsavel: 'Thiago Moreira Cardoso', sistema: 'Domínio Sistemas', assunto: 'Guia do Simples Nacional com valor incorreto' },
+    { numero: 4445760, dias: 2, modulo: 'Busca NF-e', responsavel: 'Carlos Eduardo Lima', sistema: 'Domínio Sistemas', assunto: 'Solicitação de nova credencial para busca de NF-e' },
+    { numero: 4445765, dias: 1, modulo: 'Onvio Processos', responsavel: 'Artur Seixas Pedro', sistema: 'Onvio', assunto: 'Ajuste de fluxo de aprovação solicitado pelo cliente' },
+    { numero: 4445770, dias: 0, modulo: 'Busca NF-e', responsavel: 'Rafael Andrade Souza', sistema: 'Domínio Sistemas', assunto: 'Nova solicitação de busca de NF-e para cliente recém-migrado' },
+    { numero: 4445774, dias: 0, modulo: 'Honorários', responsavel: 'Fernanda Alves Barreto', sistema: 'Domínio Sistemas', assunto: 'Dúvida sobre emissão de honorários complementares' }
+  ];
+  return rows.map(function (r) { return Object.assign({}, r, { dataAbertura: subtractDaysIso(r.dias) }); });
+}
+var PENDENCIAS_MOCK = generateMockPendencias();
 
 /* ============================================================
    FIRESTORE — referências injetadas por bootAfterFirebase() (ver init no
@@ -732,7 +762,7 @@ function navItem(view, label, iconName) {
 function renderNav() {
   var root = document.getElementById('nav-root');
   if (!session.managerId) { root.innerHTML = ''; return; }
-  root.innerHTML = navItem('dashboard', 'Dashboard', 'dashboard') + navItem('tecnicos', 'Técnicos', 'user') + navItem('agenda', 'Agenda', 'calendar') + navItem('planilhas', 'Planilhas e Matrizes', 'sheet');
+  root.innerHTML = navItem('dashboard', 'Dashboard', 'dashboard') + navItem('tecnicos', 'Técnicos', 'user') + navItem('agenda', 'Agenda', 'calendar') + navItem('planilhas', 'Planilhas e Matrizes', 'sheet') + navItem('pendencias', 'Pendências', 'alert');
 }
 
 /* ============================================================
@@ -1431,6 +1461,117 @@ function renderSheetGrid() {
   grid.innerHTML = list.length ? list.map(SpreadsheetCard).join('') : '<p class="col-span-full text-sm text-gray-500 italic">Nenhuma planilha encontrada.</p>';
 }
 
+/* ============================================================
+   PENDÊNCIAS (integração simulada com o SGD)
+   ============================================================ */
+function pendDiasBadge(dias) {
+  var cls = dias > 5 ? 'bg-red-100 text-red-700 font-bold' : (dias >= 3 ? 'bg-amber-100 text-amber-700 font-semibold' : 'bg-gray-100 text-gray-600 font-medium');
+  return '<span class="inline-flex items-center justify-center min-w-[2.25rem] px-2 py-1 rounded-full text-xs ' + cls + '">' + dias + '</span>';
+}
+function computePendenciasStats(list) {
+  var total = list.length;
+  var criticos = list.filter(function (p) { return p.dias > 5; }).length;
+  var porResponsavel = {};
+  list.forEach(function (p) { porResponsavel[p.responsavel] = (porResponsavel[p.responsavel] || 0) + 1; });
+  var topAcumuladores = Object.keys(porResponsavel).map(function (nome) { return { nome: nome, total: porResponsavel[nome] }; })
+    .sort(function (a, b) { return b.total - a.total; }).slice(0, 3);
+  var porModulo = {};
+  list.forEach(function (p) { porModulo[p.modulo] = (porModulo[p.modulo] || 0) + 1; });
+  var moduloCritico = Object.keys(porModulo).reduce(function (top, m) { return (!top || porModulo[m] > porModulo[top]) ? m : top; }, null);
+  return { total: total, criticos: criticos, topAcumuladores: topAcumuladores, moduloCritico: moduloCritico, moduloCriticoQtd: moduloCritico ? porModulo[moduloCritico] : 0 };
+}
+function topAcumuladoresHtml(top3) {
+  if (!top3.length) return '<p class="text-sm text-gray-500 italic">Sem dados.</p>';
+  var medals = ['bg-amber-400', 'bg-gray-300', 'bg-amber-700'];
+  return '<ul class="flex flex-col gap-2">' + top3.map(function (t, i) {
+    return '' +
+      '<li class="flex items-center gap-2.5">' +
+        '<span class="w-6 h-6 rounded-full ' + (medals[i] || 'bg-gray-200') + ' text-white text-[11px] font-bold flex items-center justify-center shrink-0">' + (i + 1) + '</span>' +
+        '<span class="flex-1 text-sm text-gray-800 truncate">' + escapeHtml(t.nome) + '</span>' +
+        '<span class="text-xs font-bold text-trblue">' + t.total + '</span>' +
+      '</li>';
+  }).join('') + '</ul>';
+}
+function PendenciasAnalyticsHtml(stats) {
+  return '' +
+    '<div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">' +
+      cockpitKpiCard('Volume total', String(stats.total), 'SSCs pendentes na fila', 'bg-trblue', 'sheet') +
+      cockpitKpiCard('Criticidade (aging)', String(stats.criticos), 'parados há mais de 5 dias', 'bg-red-600', 'alert') +
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<span class="text-xs font-semibold uppercase tracking-wide text-gray-500">Top acumuladores</span>' +
+        '<div class="mt-2.5">' + topAcumuladoresHtml(stats.topAcumuladores) + '</div>' +
+      '</div>' +
+      '<div class="' + CARD_CLS + ' p-5 flex items-center gap-4">' +
+        '<span class="w-11 h-11 rounded-xl bg-trorange text-white flex items-center justify-center shrink-0">' + icon('chart', 'w-5 h-5') + '</span>' +
+        '<div class="min-w-0">' +
+          '<span class="text-xs font-semibold uppercase tracking-wide text-gray-500">Módulo mais crítico</span>' +
+          '<div class="text-lg font-extrabold text-trblue mt-0.5 leading-snug">' + escapeHtml(stats.moduloCritico || '—') + '</div>' +
+          '<div class="text-[11px] text-gray-500 mt-0.5">' + stats.moduloCriticoQtd + ' pendência(s)</div>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+function pendenciaRowHtml(p) {
+  return '' +
+    '<tr class="odd:bg-white even:bg-trbg">' +
+      '<td class="px-3 py-2.5 text-sm font-semibold text-trblue whitespace-nowrap">' + escapeHtml(String(p.numero)) + '</td>' +
+      '<td class="px-3 py-2.5 text-sm text-gray-700 whitespace-nowrap">' + formatDateBr(p.dataAbertura) + '</td>' +
+      '<td class="px-3 py-2.5 text-center">' + pendDiasBadge(p.dias) + '</td>' +
+      '<td class="px-3 py-2.5 text-sm text-gray-900">' + escapeHtml(p.assunto) + '</td>' +
+      '<td class="px-3 py-2.5 text-sm text-gray-700 whitespace-nowrap">' + escapeHtml(p.modulo) + '</td>' +
+      '<td class="px-3 py-2.5 text-sm text-gray-700 whitespace-nowrap">' + escapeHtml(p.responsavel) + '</td>' +
+      '<td class="px-3 py-2.5 text-sm text-gray-500 whitespace-nowrap">' + escapeHtml(p.sistema) + '</td>' +
+    '</tr>';
+}
+function PendenciasView() {
+  return '' +
+    '<div class="flex flex-col gap-6">' +
+      '<div>' +
+        '<h2 class="text-lg font-bold text-trblue">Pendências</h2>' +
+        '<p class="text-sm text-gray-500">Chamados pendentes na fila do SGD. <em>(integração simulada &mdash; protótipo)</em></p>' +
+      '</div>' +
+      '<div id="pend-analytics"></div>' +
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<div class="flex flex-col sm:flex-row gap-3 sm:items-center sm:justify-between mb-4">' +
+          '<h3 class="text-sm font-bold text-trblue">Ocorrências</h3>' +
+          '<div class="relative flex-1 max-w-md">' +
+            icon('search', 'w-4 h-4 text-gray-400 absolute left-3 top-1/2 -translate-y-1/2') +
+            '<input type="search" id="pend-search" placeholder="Buscar por assunto ou técnico..." class="' + INPUT_CLS + ' pl-9" aria-label="Buscar pendências" />' +
+          '</div>' +
+        '</div>' +
+        '<div class="overflow-x-auto rounded-xl border border-gray-200">' +
+          '<table class="min-w-full border-collapse">' +
+            '<thead><tr>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-left whitespace-nowrap">Número</th>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-left whitespace-nowrap">Abertura</th>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-center whitespace-nowrap">Dias</th>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-left">Assunto</th>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-left whitespace-nowrap">Módulo</th>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-left whitespace-nowrap">Responsável</th>' +
+              '<th class="bg-trblue text-white text-xs font-bold px-3 py-2.5 text-left whitespace-nowrap">Sistema</th>' +
+            '</tr></thead>' +
+            '<tbody id="pend-table-body"></tbody>' +
+          '</table>' +
+        '</div>' +
+      '</div>' +
+    '</div>';
+}
+function updatePendenciasView() {
+  var searchEl = document.getElementById('pend-search');
+  var query = searchEl ? searchEl.value.trim().toLowerCase() : '';
+  var all = PENDENCIAS_MOCK;
+  var filtered = query ? all.filter(function (p) {
+    return p.assunto.toLowerCase().indexOf(query) !== -1 || p.responsavel.toLowerCase().indexOf(query) !== -1;
+  }) : all;
+  var sorted = filtered.slice().sort(function (a, b) { return b.dias - a.dias; });
+
+  var analyticsRoot = document.getElementById('pend-analytics');
+  if (analyticsRoot) analyticsRoot.innerHTML = PendenciasAnalyticsHtml(computePendenciasStats(all));
+
+  var body = document.getElementById('pend-table-body');
+  if (body) body.innerHTML = sorted.length ? sorted.map(pendenciaRowHtml).join('') : '<tr><td colspan="7" class="px-3 py-6 text-sm text-gray-500 italic text-center">Nenhuma pendência encontrada para esta busca.</td></tr>';
+}
+
 function spreadsheetDetailInner(sheet) {
   var manager = getCurrentManager();
   var techs = getTechniciansBySetor(manager.setor);
@@ -1552,6 +1693,9 @@ function renderView() {
   } else if (session.view === 'planilhas') {
     root.innerHTML = PlanilhasView();
     renderSheetGrid();
+  } else if (session.view === 'pendencias') {
+    root.innerHTML = PendenciasView();
+    updatePendenciasView();
   } else {
     // 'dashboard' (padrão) agora é o Cockpit OPS — ver requisito de
     // reestruturação: o item "Dashboard" do menu abre direto o BI.
@@ -1685,6 +1829,7 @@ document.addEventListener('click', async function (e) {
 document.addEventListener('input', function (e) {
   if (e.target.id === 'dash-search') updateTecnicosData();
   if (e.target.id === 'sheet-search') renderSheetGrid();
+  if (e.target.id === 'pend-search') updatePendenciasView();
 });
 
 document.addEventListener('keydown', function (e) {
