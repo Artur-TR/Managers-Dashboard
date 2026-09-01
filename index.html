@@ -79,7 +79,7 @@
   ::-webkit-scrollbar-thumb { background: #d8dade; border-radius: 999px; }
   ::-webkit-scrollbar-track { background: transparent; }
 </style>
-<!-- Chart.js via CDN, sem Node/NPM — usado pela view "Cockpit OPS" (ver renderCockpitCharts). -->
+<!-- Chart.js via CDN, sem Node/NPM — reservado para o Relatório Executivo (próxima entrega). -->
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <!-- SheetJS via CDN — lê .xlsx/.xls/.csv no navegador para o upload híbrido de planilhas (ver readSpreadsheetFile). -->
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
@@ -605,6 +605,7 @@ function resetDemoData() {
 function handleTechniciansUpdate() {
   if (!session.managerId) return;
   if (session.view === 'tecnicos') updateTecnicosData();
+  if (session.view === 'dashboard') renderView();
   if (session.modal && session.modal.type === 'profile') refreshProfileTabContent();
   if (session.modal && session.modal.type === 'sheet-detail') refreshSheetDetailBody();
 }
@@ -762,7 +763,7 @@ function navItem(view, label, iconName) {
 function renderNav() {
   var root = document.getElementById('nav-root');
   if (!session.managerId) { root.innerHTML = ''; return; }
-  root.innerHTML = navItem('dashboard', 'Dashboard', 'dashboard') + navItem('tecnicos', 'Técnicos', 'user') + navItem('agenda', 'Agenda', 'calendar') + navItem('planilhas', 'Planilhas e Matrizes', 'sheet') + navItem('pendencias', 'Pendências', 'alert');
+  root.innerHTML = navItem('dashboard', 'Central de Comando', 'dashboard') + navItem('tecnicos', 'Técnicos', 'user') + navItem('agenda', 'Agenda', 'calendar') + navItem('planilhas', 'Planilhas e Matrizes', 'sheet') + navItem('pendencias', 'Pendências', 'alert');
 }
 
 /* ============================================================
@@ -878,40 +879,12 @@ function updateTecnicosData() {
 }
 
 /* ============================================================
-   COCKPIT OPS — dashboard de BI com Chart.js (dados mockados)
-   Inspirado no dashboard de BI oficial: linha de KPIs, gráfico principal
-   largo (Volume vs TMA) e uma faixa inferior com 3 gráficos menores.
-   As instâncias do Chart.js ficam em COCKPIT_CHARTS para poderem ser
-   destruídas ao sair/re-renderizar a view (evita "Canvas is already in use").
+   CENTRAL DE COMANDO — tela inicial (substitui o antigo Cockpit OPS).
+   Em vez de gráficos decorativos, cruza os dados reais já existentes
+   (técnicos, treinamentos, SLA e a fila de Pendências do SGD) num único
+   feed priorizado, para o gestor não precisar visitar tela por tela
+   para montar esse quadro na cabeça.
    ============================================================ */
-var COCKPIT_CHARTS = {};
-function destroyCockpitCharts() {
-  Object.keys(COCKPIT_CHARTS).forEach(function (k) { if (COCKPIT_CHARTS[k]) COCKPIT_CHARTS[k].destroy(); });
-  COCKPIT_CHARTS = {};
-}
-
-/* Plugin local (não-global) que desenha um texto centralizado sobre o
-   donut — usado para marcar "100%" no meio do gráfico de status. */
-var cockpitCenterTextPlugin = {
-  id: 'cockpitCenterText',
-  afterDraw: function (chart) {
-    var cfg = chart.config.options.plugins && chart.config.options.plugins.centerText;
-    if (!cfg) return;
-    var ctx = chart.ctx, w = chart.width, h = chart.height;
-    ctx.save();
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
-    ctx.font = '700 22px Inter, system-ui, sans-serif';
-    ctx.fillStyle = cfg.color || '#011B36';
-    ctx.fillText(cfg.text, w / 2, h / 2 - 8);
-    if (cfg.subtext) {
-      ctx.font = '600 11px Inter, system-ui, sans-serif';
-      ctx.fillStyle = '#6b7280';
-      ctx.fillText(cfg.subtext, w / 2, h / 2 + 12);
-    }
-    ctx.restore();
-  }
-};
-
 function cockpitKpiCard(label, value, sublabel, accentCls, iconName) {
   return '' +
     '<div class="' + CARD_CLS + ' p-5 flex items-center gap-4">' +
@@ -924,124 +897,105 @@ function cockpitKpiCard(label, value, sublabel, accentCls, iconName) {
     '</div>';
 }
 
-function CockpitView() {
+/* Agrega, num único array ordenado por severidade, tudo que hoje exige
+   atenção do gestor: pendências do SGD em atraso, SLA de técnicos abaixo
+   da meta, treinamentos pendentes e técnicos sem acompanhamento recente.
+   Cada item já carrega a ação de navegação certa (abrir perfil do
+   técnico ou ir para a fila de Pendências) para viabilizar o clique
+   direto no feed, sem o gestor precisar procurar depois. */
+function computeCentralAlerts(manager) {
+  var techs = getTechniciansBySetor(manager.setor);
+  var alerts = [];
+
+  PENDENCIAS_MOCK.forEach(function (p) {
+    if (p.dias > 5) {
+      alerts.push({
+        level: p.dias > 10 ? 'critical' : 'warning',
+        text: 'Pendência #' + p.numero + ' (' + p.modulo + ') aberta há ' + p.dias + ' dias — ' + p.responsavel + '.',
+        actionLabel: 'Ver pendência', actionView: 'pendencias'
+      });
+    }
+  });
+
+  techs.forEach(function (t) {
+    if (t.metricas.slaPercentual < 90) {
+      alerts.push({ level: 'critical', text: t.nome + ' está com SLA abaixo de 90% (' + t.metricas.slaPercentual + '%).', actionLabel: 'Ver perfil', techId: t.id });
+    }
+    var pendentes = t.treinamentos.filter(function (e) { return e.status === 'pendente'; });
+    if (pendentes.length) {
+      alerts.push({ level: 'warning', text: t.nome + ' tem ' + pendentes.length + ' treinamento(s) pendente(s).', actionLabel: 'Ver perfil', techId: t.id });
+    }
+  });
+
+  var now = new Date();
+  techs.forEach(function (t) {
+    if (!t.timeline.length) { alerts.push({ level: 'info', text: 'Nenhum acompanhamento registrado ainda para ' + t.nome + '.', actionLabel: 'Ver perfil', techId: t.id }); return; }
+    var last = t.timeline.reduce(function (latest, e) { return (!latest || e.inicio > latest) ? e.inicio : latest; }, null);
+    var days = Math.floor((now - new Date(last)) / 86400000);
+    if (days > 21) alerts.push({ level: 'info', text: 'Sem acompanhamento recente para ' + t.nome + ' (há ' + days + ' dias).', actionLabel: 'Ver perfil', techId: t.id });
+  });
+
+  var order = { critical: 0, warning: 1, info: 2 };
+  return alerts.sort(function (a, b) { return order[a.level] - order[b.level]; });
+}
+function centralAlertItemHtml(a) {
+  var dot = { info: 'bg-trblue', warning: 'bg-amber-500', critical: 'bg-red-600' }[a.level];
+  var actionAttrs = a.techId ? 'data-action="open-profile" data-tech-id="' + a.techId + '"' : 'data-action="nav-goto" data-view="' + (a.actionView || 'dashboard') + '"';
+  return '' +
+    '<li class="flex items-center gap-3 bg-white border border-gray-100 rounded-lg px-3 py-2.5 hover:border-trorange/40 hover:shadow-sm transition-all duration-200">' +
+      '<span class="w-2 h-2 rounded-full shrink-0 ' + dot + '"></span>' +
+      '<span class="flex-1 text-sm text-gray-800 min-w-0">' + escapeHtml(a.text) + '</span>' +
+      '<button type="button" ' + actionAttrs + ' class="shrink-0 text-xs font-semibold text-trorange hover:text-trorangedark whitespace-nowrap">' + a.actionLabel + ' &rarr;</button>' +
+    '</li>';
+}
+function centralShortcutCard(view, iconName, label, sublabel) {
+  return '' +
+    '<button type="button" data-action="nav-goto" data-view="' + view + '" class="' + CARD_CLS + ' p-4 flex items-center gap-3 text-left hover:shadow-md hover:-translate-y-0.5 hover:border-trorange/40 transition-all duration-200 ease-in-out">' +
+      '<span class="w-10 h-10 rounded-lg bg-trbg text-trblue flex items-center justify-center shrink-0">' + icon(iconName, 'w-5 h-5') + '</span>' +
+      '<div class="min-w-0">' +
+        '<div class="text-sm font-semibold text-trblue truncate">' + escapeHtml(label) + '</div>' +
+        '<div class="text-xs text-gray-500 truncate">' + escapeHtml(sublabel) + '</div>' +
+      '</div>' +
+    '</button>';
+}
+function CentralComandoView() {
+  if (!session.techniciansLoaded) return spinnerHtml('py-16');
+  var manager = getCurrentManager();
+  var techs = getTechniciansBySetor(manager.setor);
+  var alerts = computeCentralAlerts(manager);
+  var criticos = alerts.filter(function (a) { return a.level === 'critical'; }).length;
+  var pendCriticas = PENDENCIAS_MOCK.filter(function (p) { return p.dias > 5; }).length;
+  var slaBaixo = techs.filter(function (t) { return t.metricas.slaPercentual < 90; }).length;
+  var treinPendentes = techs.reduce(function (sum, t) { return sum + t.treinamentos.filter(function (e) { return e.status === 'pendente'; }).length; }, 0);
+
   return '' +
     '<div class="flex flex-col gap-6">' +
       '<div>' +
-        '<h2 class="text-lg font-bold text-trblue">Cockpit OPS</h2>' +
-        '<p class="text-sm text-gray-500">Visão em tempo real da operação de suporte técnico. <em>(dados simulados &mdash; protótipo)</em></p>' +
+        '<h2 class="text-lg font-bold text-trblue">Central de Comando</h2>' +
+        '<p class="text-sm text-gray-500">Tudo que precisa da sua atenção hoje, num só lugar.</p>' +
       '</div>' +
 
       '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">' +
-        cockpitKpiCard('TMA', '1min 42s', 'Tempo médio de atendimento', 'bg-trblue', 'clock') +
-        cockpitKpiCard('TME', '6min 15s', 'Tempo médio de espera', 'bg-trbluelight', 'clock') +
-        cockpitKpiCard('Indisponibilidade', '4,8%', 'Últimas 10 horas', 'bg-red-600', 'alert') +
-        cockpitKpiCard('Volume', '72', 'Chamados em atendimento hoje', 'bg-trorange', 'chart') +
+        cockpitKpiCard('Alertas críticos', String(criticos), 'exigem ação imediata', 'bg-red-600', 'alert') +
+        cockpitKpiCard('Pendências em atraso', String(pendCriticas), 'SSCs há mais de 5 dias', 'bg-trorange', 'sheet') +
+        cockpitKpiCard('SLA abaixo da meta', String(slaBaixo), 'técnico(s) da equipe', 'bg-trblue', 'chart') +
+        cockpitKpiCard('Treinamentos pendentes', String(treinPendentes), 'na equipe', 'bg-trbluelight', 'check') +
       '</div>' +
 
       '<div class="' + CARD_CLS + ' p-5">' +
-        '<h3 class="text-sm font-bold text-trblue mb-3">Volume vs TMA &middot; últimas 10 horas</h3>' +
-        '<div class="h-80"><canvas id="cockpit-chart-main"></canvas></div>' +
+        '<div class="flex items-center justify-between mb-3">' +
+          '<h3 class="text-sm font-bold text-trblue">Feed de ações prioritárias</h3>' +
+          (alerts.length ? '<span class="text-xs text-gray-500">' + alerts.length + ' item(ns)</span>' : '') +
+        '</div>' +
+        '<ul class="flex flex-col gap-2">' + (alerts.length ? alerts.map(centralAlertItemHtml).join('') : '<p class="text-sm text-gray-500 italic">Nenhum alerta no momento. Tudo sob controle.</p>') + '</ul>' +
       '</div>' +
 
-      '<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">' +
-        '<div class="' + CARD_CLS + ' p-5">' +
-          '<h3 class="text-sm font-bold text-trblue mb-3">Atendimentos por fila &middot; hoje</h3>' +
-          '<div class="h-56"><canvas id="cockpit-chart-bar"></canvas></div>' +
-        '</div>' +
-        '<div class="' + CARD_CLS + ' p-5">' +
-          '<h3 class="text-sm font-bold text-trblue mb-3">Indisponibilidade &middot; tendência</h3>' +
-          '<div class="h-56"><canvas id="cockpit-chart-line-mini"></canvas></div>' +
-        '</div>' +
-        '<div class="' + CARD_CLS + ' p-5">' +
-          '<h3 class="text-sm font-bold text-trblue mb-3">Status dos chamados</h3>' +
-          '<div class="h-56"><canvas id="cockpit-chart-donut"></canvas></div>' +
-        '</div>' +
+      '<div class="grid grid-cols-1 sm:grid-cols-3 gap-4">' +
+        centralShortcutCard('tecnicos', 'user', 'Técnicos', techs.length + ' na equipe') +
+        centralShortcutCard('pendencias', 'alert', 'Pendências (SGD)', PENDENCIAS_MOCK.length + ' na fila') +
+        centralShortcutCard('planilhas', 'sheet', 'Planilhas e Matrizes', 'acesso rápido') +
       '</div>' +
     '</div>';
-}
-
-/* Instancia os 4 gráficos do Cockpit OPS. Precisa rodar DEPOIS do HTML dos
-   <canvas> já estar no DOM (ver renderView). Dados são mock estáticos de
-   uma operação de suporte técnico — sem dependência do Firestore/STATE. */
-function renderCockpitCharts() {
-  if (typeof Chart === 'undefined') { console.error('Chart.js não carregou — verifique o CDN no <head>.'); return; }
-  destroyCockpitCharts();
-
-  var mainCanvas = document.getElementById('cockpit-chart-main');
-  if (mainCanvas) {
-    COCKPIT_CHARTS.main = new Chart(mainCanvas.getContext('2d'), {
-      type: 'bar',
-      data: {
-        labels: ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'],
-        datasets: [
-          { type: 'bar', label: 'Volume', data: [58, 64, 71, 69, 52, 60, 75, 82, 78, 65], backgroundColor: 'rgba(214,64,0,0.75)', borderRadius: 4, maxBarThickness: 34, yAxisID: 'yVolume', order: 2 },
-          { type: 'line', label: 'TMA (min)', data: [1.6, 1.5, 1.8, 2.0, 2.3, 1.9, 1.7, 1.5, 1.4, 1.6], borderColor: '#011B36', backgroundColor: '#011B36', pointBackgroundColor: '#011B36', tension: 0.35, borderWidth: 2.5, pointRadius: 3, yAxisID: 'yTma', order: 1 }
-        ]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { position: 'top', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } } },
-        scales: {
-          yVolume: { position: 'left', beginAtZero: true, grid: { color: '#eef0f2' }, title: { display: true, text: 'Volume', font: { size: 10 } } },
-          yTma: { position: 'right', beginAtZero: true, grid: { display: false }, title: { display: true, text: 'TMA (min)', font: { size: 10 } } },
-          x: { grid: { display: false } }
-        }
-      }
-    });
-  }
-
-  var barCanvas = document.getElementById('cockpit-chart-bar');
-  if (barCanvas) {
-    COCKPIT_CHARTS.bar = new Chart(barCanvas.getContext('2d'), {
-      type: 'bar',
-      data: {
-        labels: ['Fila 41', 'Fila 51', 'Fila 61', 'Fila 31', 'Fila 42'],
-        datasets: [{ label: 'Atendimentos', data: [34, 28, 22, 19, 15], backgroundColor: ['#D64000', '#011B36', '#D64000', '#011B36', '#D64000'], borderRadius: 4, maxBarThickness: 28 }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, grid: { color: '#eef0f2' } }, x: { grid: { display: false } } }
-      }
-    });
-  }
-
-  var lineMiniCanvas = document.getElementById('cockpit-chart-line-mini');
-  if (lineMiniCanvas) {
-    COCKPIT_CHARTS.lineMini = new Chart(lineMiniCanvas.getContext('2d'), {
-      type: 'line',
-      data: {
-        labels: ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'],
-        datasets: [{ label: 'Indisponibilidade (%)', data: [3.2, 4.1, 5.0, 4.8, 3.9, 4.5, 5.2, 4.8, 4.3, 4.0], borderColor: '#D64000', backgroundColor: 'rgba(214,64,0,0.12)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0 }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false,
-        plugins: { legend: { display: false } },
-        scales: { y: { beginAtZero: true, grid: { color: '#eef0f2' }, ticks: { font: { size: 10 } } }, x: { grid: { display: false }, ticks: { font: { size: 9 } } } }
-      }
-    });
-  }
-
-  var donutCanvas = document.getElementById('cockpit-chart-donut');
-  if (donutCanvas) {
-    COCKPIT_CHARTS.donut = new Chart(donutCanvas.getContext('2d'), {
-      type: 'doughnut',
-      data: {
-        labels: ['Concluídos', 'Pendentes', 'Aguardando SS'],
-        datasets: [{ data: [72, 20, 8], backgroundColor: ['#D64000', '#011B36', '#9CA3AF'], borderWidth: 0, hoverOffset: 4 }]
-      },
-      options: {
-        responsive: true, maintainAspectRatio: false, cutout: '72%',
-        plugins: {
-          legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } },
-          centerText: { text: '100%', subtext: 'dos chamados', color: '#011B36' }
-        }
-      },
-      plugins: [cockpitCenterTextPlugin]
-    });
-  }
 }
 
 /* ============================================================
@@ -1697,10 +1651,10 @@ function renderView() {
     root.innerHTML = PendenciasView();
     updatePendenciasView();
   } else {
-    // 'dashboard' (padrão) agora é o Cockpit OPS — ver requisito de
-    // reestruturação: o item "Dashboard" do menu abre direto o BI.
-    root.innerHTML = CockpitView();
-    renderCockpitCharts();
+    // 'dashboard' (padrão) agora é a Central de Comando: feed único de
+    // alertas cruzando técnicos + pendências, no lugar do antigo Cockpit
+    // OPS (gráficos de BI desconectados do restante dos dados reais).
+    root.innerHTML = CentralComandoView();
   }
 }
 function renderModal() {
