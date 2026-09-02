@@ -878,7 +878,202 @@ function updateTecnicosData() {
 }
 
 /* ============================================================
-   COCKPIT OPS — dashboard de BI com Chart.js (dados mockados)
+   INTEGRAÇÃO — Genesys Cloud Analytics API
+   Alimenta o Cockpit OPS com dados reais (conversas e presença dos
+   técnicos), consumidos direto do navegador via fetch() com Bearer Token.
+
+   PROTÓTIPO: GENESYS_TOKEN é o token de sessão do usuário (copiado
+   manualmente do Genesys Cloud), então expira rápido — atualize a
+   variável abaixo antes de cada apresentação. Em produção, troque para
+   um fluxo onde um backend guarda a Client Secret (OAuth Client
+   Credentials) e devolve só um token de curta duração para o front-end;
+   uma Secret Key nunca deve ficar hardcoded num arquivo servido ao
+   navegador.
+
+   CORS: o Genesys Cloud só aceita chamadas de origens autorizadas.
+   Se o fetch falhar sem nem chegar a um status HTTP (erro de rede/CORS
+   no console), cadastre a origem em que este dashboard roda (ex.:
+   http://localhost:8123) em Admin > Integrações > CORS no Genesys Cloud.
+   ============================================================ */
+
+// Cole aqui o Bearer Token atual (sem o prefixo "Bearer "). Único lugar do
+// código que precisa ser tocado para renovar a sessão.
+var GENESYS_TOKEN = 'COLE_SEU_BEARER_TOKEN_AQUI';
+
+// Domínio da API conforme a região do org Genesys Cloud (ver Admin >
+// Configurações da conta > Região). Alguns exemplos comuns:
+//   Américas (leste)  -> https://api.mypurecloud.com
+//   Américas (oeste)  -> https://api.usw2.pure.cloud
+//   América do Sul    -> https://api.sa1.pure.cloud
+//   Europa (Irlanda)  -> https://api.mypurecloud.ie
+var GENESYS_API_BASE = 'https://api.mypurecloud.com';
+
+// Qualifiers de "tSystemPresence" considerados tempo disponível/produtivo;
+// todo o restante (BUSY, AWAY, BREAK, MEAL, MEETING, TRAINING, OFFLINE...)
+// entra no cálculo de "Indisponibilidade". São os valores padrão do
+// sistema Genesys (não os nomes customizados da presença), então valem
+// para qualquer org.
+var GENESYS_AVAILABLE_PRESENCES = ['AVAILABLE', 'ON_QUEUE'];
+
+var GENESYS_STATE = { error: null, lastUpdated: null };
+var GENESYS_QUEUE_NAME_CACHE = {};
+
+/* Wrapper único do fetch(): injeta os headers exigidos (Authorization +
+   Content-Type) e centraliza o tratamento de 401. Qualquer chamada nova à
+   API do Genesys deve passar por aqui — nunca chamar fetch() direto. */
+function genesysFetch(path, options) {
+  options = options || {};
+  options.headers = { 'Authorization': 'Bearer ' + GENESYS_TOKEN, 'Content-Type': 'application/json' };
+  return fetch(GENESYS_API_BASE + path, options).then(function (res) {
+    if (res.status === 401) {
+      var authErr = new Error('Sessão expirada. Por favor, atualize o Token no código.');
+      authErr.isGenesysAuthError = true;
+      throw authErr;
+    }
+    if (!res.ok) {
+      return res.text().then(function (body) {
+        throw new Error('Erro Genesys Cloud (' + res.status + '): ' + (body || res.statusText));
+      });
+    }
+    return res.status === 204 ? null : res.json();
+  });
+}
+function genesysPost(path, body) { return genesysFetch(path, { method: 'POST', body: JSON.stringify(body) }); }
+function genesysGet(path) { return genesysFetch(path, { method: 'GET' }); }
+
+/* -------- utilitários de tempo -------- */
+// Milissegundos -> "MM:SS" (ou "HH:MM:SS" quando passa de 1h).
+function msToClock(ms) {
+  var totalSec = Math.max(0, Math.round((ms || 0) / 1000));
+  var h = Math.floor(totalSec / 3600), m = Math.floor((totalSec % 3600) / 60), s = totalSec % 60;
+  var pad = function (n) { return String(n).padStart(2, '0'); };
+  return h > 0 ? (h + ':' + pad(m) + ':' + pad(s)) : (pad(m) + ':' + pad(s));
+}
+// Milissegundos -> "1min 42s", estilo compacto usado nos cards de KPI.
+function msToShort(ms) {
+  var totalSec = Math.max(0, Math.round((ms || 0) / 1000));
+  var m = Math.floor(totalSec / 60), s = totalSec % 60;
+  return m > 0 ? (m + 'min ' + s + 's') : (s + 's');
+}
+// Intervalo padrão do Cockpit: das 08h de hoje até agora (cai para as
+// últimas 10h se ainda não passou das 08h) — formato ISO-8601 UTC exigido
+// pela API ("Z" já vem de toISOString()).
+function genesysDashboardInterval() {
+  var now = new Date();
+  var start = new Date(now); start.setHours(8, 0, 0, 0);
+  if (now < start) start = new Date(now.getTime() - 10 * 3600 * 1000);
+  return start.toISOString() + '/' + now.toISOString();
+}
+function formatHourLabel(intervalStr) {
+  var d = new Date((intervalStr || '').split('/')[0]);
+  return isNaN(d) ? '' : String(d.getHours()).padStart(2, '0') + 'h';
+}
+
+/* -------- leitura da resposta de aggregates/query --------
+   Cada "data point" (um bucket, com ou sem granularity) traz metrics: um
+   array de { metric, qualifier?, stats: { count, sum, min, max } }. */
+function metricStat(dataPoint, metricName, statKey) {
+  return (dataPoint.metrics || []).reduce(function (total, m) {
+    if (m.metric !== metricName) return total;
+    return total + (m.stats && typeof m.stats[statKey] === 'number' ? m.stats[statKey] : 0);
+  }, 0);
+}
+// Para métricas com "qualifier" (ex.: tSystemPresence quebrado por status):
+// devolve { AVAILABLE: 120000, BREAK: 30000, ... } somando o tempo (sum).
+function sumByQualifier(dataPoint, metricName) {
+  var out = {};
+  (dataPoint.metrics || []).forEach(function (m) {
+    if (m.metric !== metricName) return;
+    var q = m.qualifier || 'DESCONHECIDO';
+    out[q] = (out[q] || 0) + (m.stats && m.stats.sum || 0);
+  });
+  return out;
+}
+
+/* -------- 1) Volume, TMA e TME + 2) filas mais atendidas --------
+   Mesmo endpoint (POST /conversations/aggregates/query); o que muda é
+   granularity (para série temporal) x groupBy (para separar por fila). */
+function fetchConversationsAggregates(interval, opts) {
+  opts = opts || {};
+  var body = { interval: interval, metrics: ['nOffered', 'nAnswered', 'nAbandon', 'tHandle', 'tAnswered', 'tAcd'] };
+  if (opts.granularity) body.granularity = opts.granularity;
+  if (opts.groupBy) body.groupBy = opts.groupBy;
+  return genesysPost('/api/v2/analytics/conversations/aggregates/query', body);
+}
+// Resolve queueId -> nome real via GET /routing/queues/{id}, com cache em
+// memória (os IDs não mudam, não precisa buscar de novo a cada refresh).
+function resolveQueueNames(queueIds) {
+  var missing = queueIds.filter(function (id) { return id && !GENESYS_QUEUE_NAME_CACHE[id]; });
+  if (!missing.length) return Promise.resolve(GENESYS_QUEUE_NAME_CACHE);
+  return Promise.all(missing.map(function (id) {
+    return genesysGet('/api/v2/routing/queues/' + id)
+      .then(function (q) { GENESYS_QUEUE_NAME_CACHE[id] = q.name || id; })
+      .catch(function () { GENESYS_QUEUE_NAME_CACHE[id] = id; });
+  })).then(function () { return GENESYS_QUEUE_NAME_CACHE; });
+}
+function fetchTopQueues(interval, topN) {
+  return fetchConversationsAggregates(interval, { groupBy: ['queueId'] }).then(function (json) {
+    var rows = (json.results || [])
+      .map(function (r) {
+        var data = (r.data && r.data[0]) || {};
+        return { queueId: r.group && r.group.queueId, nOffered: metricStat(data, 'nOffered', 'count') };
+      })
+      .filter(function (r) { return r.queueId; })
+      .sort(function (a, b) { return b.nOffered - a.nOffered; })
+      .slice(0, topN || 5);
+    return resolveQueueNames(rows.map(function (r) { return r.queueId; })).then(function (names) {
+      rows.forEach(function (r) { r.name = names[r.queueId] || r.queueId; });
+      return rows;
+    });
+  });
+}
+
+/* -------- 3) Indisponibilidade total (POST /users/aggregates/query) -------- */
+function fetchUsersPresenceAggregates(interval, opts) {
+  opts = opts || {};
+  var body = { interval: interval, metrics: ['tSystemPresence'] };
+  if (opts.granularity) body.granularity = opts.granularity;
+  if (opts.groupBy) body.groupBy = opts.groupBy;
+  return genesysPost('/api/v2/analytics/users/aggregates/query', body);
+}
+// A partir de um data point, devolve a % de tempo fora de
+// GENESYS_AVAILABLE_PRESENCES em relação ao total de tempo com presença
+// registrada nesse bucket.
+function unavailabilityPercent(dataPoint) {
+  var byQualifier = sumByQualifier(dataPoint, 'tSystemPresence');
+  var total = 0, unavailable = 0;
+  Object.keys(byQualifier).forEach(function (q) {
+    total += byQualifier[q];
+    if (GENESYS_AVAILABLE_PRESENCES.indexOf(q) === -1) unavailable += byQualifier[q];
+  });
+  return total ? (unavailable / total) * 100 : 0;
+}
+
+/* -------- 4) Timeline exata de indisponibilidade de um técnico --------
+   POST /users/details/query devolve, por usuário, o array routingStatus
+   (troca de status de roteamento) com startTime/endTime exatos. */
+function fetchUserRoutingTimeline(userId, interval) {
+  var body = {
+    interval: interval,
+    userFilters: [{ type: 'or', predicates: [{ type: 'dimension', dimension: 'userId', operator: 'matches', value: userId }] }]
+  };
+  return genesysPost('/api/v2/analytics/users/details/query', body).then(function (json) {
+    var user = (json.userDetails || [])[0];
+    return (user && user.routingStatus) || [];
+  });
+}
+
+/* -------- banner de erro (401 amigável) no topo do Cockpit -------- */
+function updateGenesysBanner() {
+  var el = document.getElementById('cockpit-genesys-banner');
+  if (!el) return;
+  el.innerHTML = GENESYS_STATE.error
+    ? '<div class="rounded-xl border border-red-200 bg-red-50 text-red-700 text-sm font-medium px-4 py-3 flex items-center gap-2">' + icon('alert', 'w-4 h-4 shrink-0') + '<span>' + escapeHtml(GENESYS_STATE.error) + '</span></div>'
+    : '';
+}
+
+/* ============================================================
+   COCKPIT OPS — dashboard de BI com Chart.js (dados reais do Genesys Cloud)
    Inspirado no dashboard de BI oficial: linha de KPIs, gráfico principal
    largo (Volume vs TMA) e uma faixa inferior com 3 gráficos menores.
    As instâncias do Chart.js ficam em COCKPIT_CHARTS para poderem ser
@@ -912,41 +1107,54 @@ var cockpitCenterTextPlugin = {
   }
 };
 
-function cockpitKpiCard(label, value, sublabel, accentCls, iconName) {
+function cockpitKpiCard(label, value, sublabel, accentCls, iconName, kpiId) {
   return '' +
     '<div class="' + CARD_CLS + ' p-5 flex items-center gap-4">' +
       '<span class="w-11 h-11 rounded-xl ' + accentCls + ' text-white flex items-center justify-center shrink-0">' + icon(iconName, 'w-5 h-5') + '</span>' +
       '<div class="min-w-0">' +
         '<span class="text-xs font-semibold uppercase tracking-wide text-gray-500">' + escapeHtml(label) + '</span>' +
-        '<div class="text-2xl font-extrabold text-trblue mt-0.5 truncate">' + escapeHtml(value) + '</div>' +
-        (sublabel ? '<div class="text-[11px] text-gray-500 mt-0.5">' + escapeHtml(sublabel) + '</div>' : '') +
+        '<div class="text-2xl font-extrabold text-trblue mt-0.5 truncate"' + (kpiId ? ' data-kpi-value="' + kpiId + '"' : '') + '>' + escapeHtml(value) + '</div>' +
+        '<div class="text-[11px] text-gray-500 mt-0.5"' + (kpiId ? ' data-kpi-sublabel="' + kpiId + '"' : '') + '>' + escapeHtml(sublabel || '') + '</div>' +
       '</div>' +
     '</div>';
+}
+// Atualiza um KPI já renderizado sem precisar recriar o card inteiro
+// (evita perder o estado dos gráficos/inputs ao redor).
+function setKpiValue(kpiId, value, sublabel) {
+  var valueEl = document.querySelector('[data-kpi-value="' + kpiId + '"]');
+  var subEl = document.querySelector('[data-kpi-sublabel="' + kpiId + '"]');
+  if (valueEl) valueEl.textContent = value;
+  if (subEl && sublabel != null) subEl.textContent = sublabel;
 }
 
 function CockpitView() {
   return '' +
     '<div class="flex flex-col gap-6">' +
-      '<div>' +
-        '<h2 class="text-lg font-bold text-trblue">Cockpit OPS</h2>' +
-        '<p class="text-sm text-gray-500">Visão em tempo real da operação de suporte técnico. <em>(dados simulados &mdash; protótipo)</em></p>' +
+      '<div class="flex items-start justify-between gap-3 flex-wrap">' +
+        '<div>' +
+          '<h2 class="text-lg font-bold text-trblue">Cockpit OPS</h2>' +
+          '<p class="text-sm text-gray-500">Visão em tempo real da operação de suporte técnico &mdash; dados do <strong>Genesys Cloud</strong>.</p>' +
+        '</div>' +
+        '<button type="button" data-action="refresh-cockpit" class="' + BTN_GHOST + '">' + icon('refresh', 'w-4 h-4') + 'Atualizar</button>' +
       '</div>' +
 
+      '<div id="cockpit-genesys-banner"></div>' +
+
       '<div class="grid grid-cols-2 lg:grid-cols-4 gap-4">' +
-        cockpitKpiCard('TMA', '1min 42s', 'Tempo médio de atendimento', 'bg-trblue', 'clock') +
-        cockpitKpiCard('TME', '6min 15s', 'Tempo médio de espera', 'bg-trbluelight', 'clock') +
-        cockpitKpiCard('Indisponibilidade', '4,8%', 'Últimas 10 horas', 'bg-red-600', 'alert') +
-        cockpitKpiCard('Volume', '72', 'Chamados em atendimento hoje', 'bg-trorange', 'chart') +
+        cockpitKpiCard('TMA', '…', 'Tempo médio de atendimento', 'bg-trblue', 'clock', 'tma') +
+        cockpitKpiCard('TME', '…', 'Tempo médio de espera', 'bg-trbluelight', 'clock', 'tme') +
+        cockpitKpiCard('Indisponibilidade', '…', 'Média do período', 'bg-red-600', 'alert', 'indisponibilidade') +
+        cockpitKpiCard('Volume', '…', 'Chamados oferecidos no período', 'bg-trorange', 'chart', 'volume') +
       '</div>' +
 
       '<div class="' + CARD_CLS + ' p-5">' +
-        '<h3 class="text-sm font-bold text-trblue mb-3">Volume vs TMA &middot; últimas 10 horas</h3>' +
+        '<h3 class="text-sm font-bold text-trblue mb-3">Volume vs TMA &middot; desde as 08h</h3>' +
         '<div class="h-80"><canvas id="cockpit-chart-main"></canvas></div>' +
       '</div>' +
 
       '<div class="grid grid-cols-1 lg:grid-cols-3 gap-4">' +
         '<div class="' + CARD_CLS + ' p-5">' +
-          '<h3 class="text-sm font-bold text-trblue mb-3">Atendimentos por fila &middot; hoje</h3>' +
+          '<h3 class="text-sm font-bold text-trblue mb-3">Top 5 filas mais atendidas &middot; hoje</h3>' +
           '<div class="h-56"><canvas id="cockpit-chart-bar"></canvas></div>' +
         '</div>' +
         '<div class="' + CARD_CLS + ' p-5">' +
@@ -954,17 +1162,27 @@ function CockpitView() {
           '<div class="h-56"><canvas id="cockpit-chart-line-mini"></canvas></div>' +
         '</div>' +
         '<div class="' + CARD_CLS + ' p-5">' +
-          '<h3 class="text-sm font-bold text-trblue mb-3">Status dos chamados</h3>' +
+          '<h3 class="text-sm font-bold text-trblue mb-3">Atendidas vs abandonadas</h3>' +
           '<div class="h-56"><canvas id="cockpit-chart-donut"></canvas></div>' +
         '</div>' +
+      '</div>' +
+
+      '<div class="' + CARD_CLS + ' p-5">' +
+        '<h3 class="text-sm font-bold text-trblue mb-1">Timeline de indisponibilidade por técnico</h3>' +
+        '<p class="text-xs text-gray-500 mb-3">Consulta pontual ao histórico de status (routingStatus) de um técnico no Genesys Cloud &mdash; informe o <strong>User ID</strong> dele (Admin &gt; Pessoas &gt; usuário &gt; campo "ID").</p>' +
+        '<form data-action="genesys-timeline-lookup" class="flex flex-col sm:flex-row gap-2 mb-4">' +
+          '<input type="text" name="userId" placeholder="User ID do Genesys" required class="' + INPUT_CLS + ' flex-1" />' +
+          '<button type="submit" class="' + BTN_PRIMARY + ' shrink-0">Buscar</button>' +
+        '</form>' +
+        '<div id="genesys-timeline-result" class="text-sm text-gray-500 italic"></div>' +
       '</div>' +
     '</div>';
 }
 
-/* Instancia os 4 gráficos do Cockpit OPS. Precisa rodar DEPOIS do HTML dos
-   <canvas> já estar no DOM (ver renderView). Dados são mock estáticos de
-   uma operação de suporte técnico — sem dependência do Firestore/STATE. */
-function renderCockpitCharts() {
+/* Instancia os 4 gráficos do Cockpit OPS a partir de `data` (números já
+   calculados a partir da resposta do Genesys — ver renderCockpitFromGenesysData).
+   Precisa rodar DEPOIS do HTML dos <canvas> já estar no DOM (ver renderView). */
+function drawCockpitCharts(data) {
   if (typeof Chart === 'undefined') { console.error('Chart.js não carregou — verifique o CDN no <head>.'); return; }
   destroyCockpitCharts();
 
@@ -973,10 +1191,10 @@ function renderCockpitCharts() {
     COCKPIT_CHARTS.main = new Chart(mainCanvas.getContext('2d'), {
       type: 'bar',
       data: {
-        labels: ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'],
+        labels: data.mainLabels,
         datasets: [
-          { type: 'bar', label: 'Volume', data: [58, 64, 71, 69, 52, 60, 75, 82, 78, 65], backgroundColor: 'rgba(214,64,0,0.75)', borderRadius: 4, maxBarThickness: 34, yAxisID: 'yVolume', order: 2 },
-          { type: 'line', label: 'TMA (min)', data: [1.6, 1.5, 1.8, 2.0, 2.3, 1.9, 1.7, 1.5, 1.4, 1.6], borderColor: '#011B36', backgroundColor: '#011B36', pointBackgroundColor: '#011B36', tension: 0.35, borderWidth: 2.5, pointRadius: 3, yAxisID: 'yTma', order: 1 }
+          { type: 'bar', label: 'Volume', data: data.volume, backgroundColor: 'rgba(214,64,0,0.75)', borderRadius: 4, maxBarThickness: 34, yAxisID: 'yVolume', order: 2 },
+          { type: 'line', label: 'TMA (min)', data: data.tmaMin, borderColor: '#011B36', backgroundColor: '#011B36', pointBackgroundColor: '#011B36', tension: 0.35, borderWidth: 2.5, pointRadius: 3, yAxisID: 'yTma', order: 1 }
         ]
       },
       options: {
@@ -997,8 +1215,8 @@ function renderCockpitCharts() {
     COCKPIT_CHARTS.bar = new Chart(barCanvas.getContext('2d'), {
       type: 'bar',
       data: {
-        labels: ['Fila 41', 'Fila 51', 'Fila 61', 'Fila 31', 'Fila 42'],
-        datasets: [{ label: 'Atendimentos', data: [34, 28, 22, 19, 15], backgroundColor: ['#D64000', '#011B36', '#D64000', '#011B36', '#D64000'], borderRadius: 4, maxBarThickness: 28 }]
+        labels: data.queueLabels,
+        datasets: [{ label: 'Atendimentos', data: data.queueData, backgroundColor: data.queueLabels.map(function (_, i) { return i % 2 === 0 ? '#D64000' : '#011B36'; }), borderRadius: 4, maxBarThickness: 28 }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -1013,8 +1231,8 @@ function renderCockpitCharts() {
     COCKPIT_CHARTS.lineMini = new Chart(lineMiniCanvas.getContext('2d'), {
       type: 'line',
       data: {
-        labels: ['08h', '09h', '10h', '11h', '12h', '13h', '14h', '15h', '16h', '17h'],
-        datasets: [{ label: 'Indisponibilidade (%)', data: [3.2, 4.1, 5.0, 4.8, 3.9, 4.5, 5.2, 4.8, 4.3, 4.0], borderColor: '#D64000', backgroundColor: 'rgba(214,64,0,0.12)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0 }]
+        labels: data.unavailLabels,
+        datasets: [{ label: 'Indisponibilidade (%)', data: data.unavailPct, borderColor: '#D64000', backgroundColor: 'rgba(214,64,0,0.12)', fill: true, tension: 0.4, borderWidth: 2, pointRadius: 0 }]
       },
       options: {
         responsive: true, maintainAspectRatio: false,
@@ -1026,22 +1244,123 @@ function renderCockpitCharts() {
 
   var donutCanvas = document.getElementById('cockpit-chart-donut');
   if (donutCanvas) {
+    var totalDonut = data.donutData[0] + data.donutData[1];
+    var answeredPct = totalDonut ? Math.round((data.donutData[0] / totalDonut) * 100) : 0;
     COCKPIT_CHARTS.donut = new Chart(donutCanvas.getContext('2d'), {
       type: 'doughnut',
       data: {
-        labels: ['Concluídos', 'Pendentes', 'Aguardando SS'],
-        datasets: [{ data: [72, 20, 8], backgroundColor: ['#D64000', '#011B36', '#9CA3AF'], borderWidth: 0, hoverOffset: 4 }]
+        labels: ['Atendidas', 'Abandonadas'],
+        datasets: [{ data: data.donutData, backgroundColor: ['#011B36', '#D64000'], borderWidth: 0, hoverOffset: 4 }]
       },
       options: {
         responsive: true, maintainAspectRatio: false, cutout: '72%',
         plugins: {
           legend: { position: 'bottom', labels: { usePointStyle: true, boxWidth: 8, font: { size: 11 } } },
-          centerText: { text: '100%', subtext: 'dos chamados', color: '#011B36' }
+          centerText: { text: answeredPct + '%', subtext: 'atendidas', color: '#011B36' }
         }
       },
       plugins: [cockpitCenterTextPlugin]
     });
   }
+}
+
+/* Busca os dados reais no Genesys Cloud (2 aggregates + 1 grouped query) e
+   alimenta KPIs + gráficos. Chamada pelo renderView() ao entrar no Cockpit
+   e pelo botão "Atualizar". Qualquer erro de rede/API cai no catch — 401
+   vira a mensagem amigável no banner; outros erros mostram um aviso
+   genérico e os gráficos ficam zerados (nunca quebram a tela). */
+async function loadCockpitGenesysData() {
+  GENESYS_STATE.error = null;
+  updateGenesysBanner();
+  var interval = genesysDashboardInterval();
+
+  try {
+    var results = await Promise.all([
+      fetchConversationsAggregates(interval, { granularity: 'PT1H' }),
+      fetchUsersPresenceAggregates(interval, { granularity: 'PT1H' }),
+      fetchTopQueues(interval, 5)
+    ]);
+    renderCockpitFromGenesysData(results[0], results[1], results[2]);
+    GENESYS_STATE.lastUpdated = new Date();
+  } catch (err) {
+    console.error('Falha ao carregar dados do Genesys Cloud:', err);
+    GENESYS_STATE.error = err.isGenesysAuthError
+      ? err.message
+      : 'Não foi possível carregar os dados do Genesys Cloud agora. Verifique o token e a conexão, depois clique em "Atualizar".';
+    updateGenesysBanner();
+    drawCockpitCharts({ mainLabels: [], volume: [], tmaMin: [], queueLabels: [], queueData: [], unavailLabels: [], unavailPct: [], donutData: [0, 0] });
+  }
+}
+
+/* Reduz as 3 respostas do Genesys (conversas com granularity, presença com
+   granularity, filas agrupadas) para os números exibidos nos KPIs e os
+   arrays que os 4 gráficos do Cockpit esperam. */
+function renderCockpitFromGenesysData(conversationsJson, usersJson, queueRows) {
+  var convBuckets = (conversationsJson.results && conversationsJson.results[0] && conversationsJson.results[0].data) || [];
+  var mainLabels = convBuckets.map(function (b) { return formatHourLabel(b.interval); });
+  var volume = convBuckets.map(function (b) { return metricStat(b, 'nOffered', 'count'); });
+  var tmaMin = convBuckets.map(function (b) {
+    var sum = metricStat(b, 'tHandle', 'sum'), count = metricStat(b, 'tHandle', 'count');
+    return count ? +(sum / count / 60000).toFixed(2) : 0;
+  });
+
+  var totalOffered = volume.reduce(function (a, b) { return a + b; }, 0);
+  var totalAnswered = convBuckets.reduce(function (s, b) { return s + metricStat(b, 'nAnswered', 'count'); }, 0);
+  var totalAbandon = convBuckets.reduce(function (s, b) { return s + metricStat(b, 'nAbandon', 'count'); }, 0);
+  var tHandleSum = convBuckets.reduce(function (s, b) { return s + metricStat(b, 'tHandle', 'sum'); }, 0);
+  var tHandleCount = convBuckets.reduce(function (s, b) { return s + metricStat(b, 'tHandle', 'count'); }, 0);
+  var tWaitSum = convBuckets.reduce(function (s, b) { return s + (metricStat(b, 'tAnswered', 'sum') || metricStat(b, 'tAcd', 'sum')); }, 0);
+  var tWaitCount = convBuckets.reduce(function (s, b) { return s + (metricStat(b, 'tAnswered', 'count') || metricStat(b, 'tAcd', 'count')); }, 0);
+
+  setKpiValue('tma', tHandleCount ? msToShort(tHandleSum / tHandleCount) : '—', 'Tempo médio de atendimento');
+  setKpiValue('tme', tWaitCount ? msToShort(tWaitSum / tWaitCount) : '—', 'Tempo médio de espera');
+  setKpiValue('volume', String(totalOffered), 'Chamados oferecidos no período');
+
+  var userBuckets = (usersJson.results && usersJson.results[0] && usersJson.results[0].data) || [];
+  var unavailLabels = userBuckets.map(function (b) { return formatHourLabel(b.interval); });
+  var unavailPct = userBuckets.map(function (b) { return +unavailabilityPercent(b).toFixed(1); });
+  var avgUnavail = unavailPct.length ? unavailPct.reduce(function (a, b) { return a + b; }, 0) / unavailPct.length : 0;
+  setKpiValue('indisponibilidade', avgUnavail.toFixed(1).replace('.', ',') + '%', 'Média do período');
+
+  drawCockpitCharts({
+    mainLabels: mainLabels, volume: volume, tmaMin: tmaMin,
+    queueLabels: queueRows.map(function (r) { return r.name; }),
+    queueData: queueRows.map(function (r) { return r.nOffered; }),
+    unavailLabels: unavailLabels, unavailPct: unavailPct,
+    donutData: [totalAnswered, totalAbandon]
+  });
+}
+
+// Chamada pelo renderView() (e pelo botão "Atualizar") ao entrar no Cockpit.
+function renderCockpitCharts() {
+  destroyCockpitCharts();
+  loadCockpitGenesysData();
+}
+
+/* Renderiza a timeline de status (item 4 do mapa de integração) buscada
+   sob demanda para um User ID específico — ver form "genesys-timeline-lookup". */
+function renderGenesysTimelineResult(entries) {
+  var root = document.getElementById('genesys-timeline-result');
+  if (!root) return;
+  if (!entries.length) { root.innerHTML = '<p class="text-sm text-gray-500 italic">Nenhuma mudança de status registrada nesse período.</p>'; return; }
+  var rows = entries.map(function (e) {
+    var start = new Date(e.startTime), end = e.endTime ? new Date(e.endTime) : null;
+    var durationMs = end ? (end - start) : (Date.now() - start);
+    return '' +
+      '<tr class="odd:bg-white even:bg-trbg">' +
+        '<td class="px-3 py-2 text-sm font-semibold text-trblue whitespace-nowrap">' + escapeHtml(e.routingStatus || '—') + '</td>' +
+        '<td class="px-3 py-2 text-sm text-gray-700 whitespace-nowrap">' + start.toLocaleString('pt-BR') + '</td>' +
+        '<td class="px-3 py-2 text-sm text-gray-700 whitespace-nowrap">' + (end ? end.toLocaleString('pt-BR') : 'em andamento') + '</td>' +
+        '<td class="px-3 py-2 text-sm text-gray-700 whitespace-nowrap">' + msToClock(durationMs) + '</td>' +
+      '</tr>';
+  }).join('');
+  root.innerHTML = '' +
+    '<div class="overflow-x-auto">' +
+      '<table class="w-full text-left border-collapse">' +
+        '<thead><tr class="text-xs font-semibold uppercase text-gray-500"><th class="px-3 py-2">Status</th><th class="px-3 py-2">Início</th><th class="px-3 py-2">Fim</th><th class="px-3 py-2">Duração</th></tr></thead>' +
+        '<tbody>' + rows + '</tbody>' +
+      '</table>' +
+    '</div>';
 }
 
 /* ============================================================
@@ -1743,6 +2062,8 @@ document.addEventListener('click', async function (e) {
       // que faltava era re-renderizar o próprio menu após a troca (senão o
       // laranja só aparecia depois de outra ação que disparasse renderAll()).
       session.view = el.dataset.view; renderNav(); renderView(); break;
+    case 'refresh-cockpit':
+      loadCockpitGenesysData(); break;
     case 'open-profile':
       openProfile(el.dataset.techId); break;
     case 'close-modal':
@@ -1858,6 +2179,21 @@ document.addEventListener('submit', async function (e) {
   var data = formDataToObject(form);
 
   switch (form.dataset.action) {
+    case 'genesys-timeline-lookup': {
+      var lookupBtn = form.querySelector('button[type="submit"]'); var lookupLabel = lookupBtn.textContent;
+      var resultRoot = document.getElementById('genesys-timeline-result');
+      lookupBtn.disabled = true; lookupBtn.textContent = 'Buscando...';
+      if (resultRoot) resultRoot.innerHTML = '<p class="text-sm text-gray-500 italic">Buscando timeline...</p>';
+      try {
+        var timelineEntries = await fetchUserRoutingTimeline(data.userId, genesysDashboardInterval());
+        renderGenesysTimelineResult(timelineEntries);
+      } catch (timelineErr) {
+        console.error('Falha ao buscar timeline do técnico:', timelineErr);
+        if (resultRoot) resultRoot.innerHTML = '<p class="text-sm text-red-600">' + escapeHtml(timelineErr.isGenesysAuthError ? timelineErr.message : 'Não foi possível buscar a timeline. Verifique o User ID e o token.') + '</p>';
+      }
+      lookupBtn.disabled = false; lookupBtn.textContent = lookupLabel;
+      break;
+    }
     case 'submit-add-tech': {
       var manager = getCurrentManager();
       var submitBtnAdd = form.querySelector('button[type="submit"]'); var labelAdd = submitBtnAdd.textContent;
